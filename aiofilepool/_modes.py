@@ -1,13 +1,20 @@
 from typing import Self
 
+from aiofilepool.errors import InvalidFileModeError
+
 
 class ModeSpec:
-    __slots__ = ("read", "write", "truncate")
+    __slots__ = ("read", "write", "truncate", "mode", "renewal_mode")
 
     def __init__(self, read: bool, write: bool, truncate: bool):
+        if not read and not write:
+            raise InvalidFileModeError("mode must be at least read or write")
+
         self.read = read
         self.write = write
         self.truncate = truncate
+        self.mode = f"{'r' if read and not truncate else ''}{'w' if write and truncate else ''}{'+' if write and not truncate else ''}b"
+        self.renewal_mode = f"r{'+' if write else ''}b"
 
     @classmethod
     def from_str(cls, mode: str) -> Self:
