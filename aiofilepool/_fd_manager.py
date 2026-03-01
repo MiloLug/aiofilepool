@@ -24,15 +24,14 @@ class FileDescriptorManager:
 
     def _restore_descriptor(self, handle: FileHandle) -> IOBase | None:
         if handle in self._descriptors:
-            if handle in self._cold_handles:
-                self._cold_handles.remove(handle)
+            self._cold_handles.discard(handle)
             return self._descriptors[handle]
 
         if handle not in self._inactive_handles:
             return None
 
         self._ensure_slot()
-        self._inactive_handles.remove(handle)
+        self._inactive_handles.discard(handle)
         self._descriptors[handle] = open(handle._path, handle._mode.renewal_mode)
         return self._descriptors[handle]
 
@@ -55,7 +54,7 @@ class FileDescriptorManager:
         fd = self._descriptors.pop(handle)
         fd.flush()
         fd.close()
-        self._cold_handles.remove(handle)
+        self._cold_handles.discard(handle)
 
     def close_all(self) -> None:
         for handle in self._descriptors:
