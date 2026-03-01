@@ -1,5 +1,3 @@
-"""Open request wrapper supporting await and async context manager usage."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -18,18 +16,11 @@ class OpenRequest:
         self,
         pool: "FilePool",
         path: str,
-        mode: str,
-        *,
-        encoding: str | None,
-        errors: str | None,
-        newline: str | None,
+        read: bool = True,
+        write: bool = False,
     ) -> None:
         self._pool = pool
         self._path = path
-        self._mode = mode
-        self._encoding = encoding
-        self._errors = errors
-        self._newline = newline
         self._used = False
         self._entered_handle: FileHandle | None = None
 

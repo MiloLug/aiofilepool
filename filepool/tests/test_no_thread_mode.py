@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from filepool import FilePool
+from filepool import FilePool, PoolStateError
 
 
 class FilePoolNoThreadModeTests(unittest.IsolatedAsyncioTestCase):
@@ -71,3 +71,25 @@ class FilePoolNoThreadModeTests(unittest.IsolatedAsyncioTestCase):
                 await handle.write("abcdef")
                 await handle.seek(0)
                 self.assertEqual(await handle.read(), "abcdef")
+
+    async def test_close_and_stats_reject_other_event_loop(self) -> None:
+        p = self.tmp_path / "cross-loop.bin"
+        p.write_bytes(b"abc")
+
+        pool = FilePool(descriptor_pool_size=1, thread_pool_size=0)
+        handle = await pool.open(p, "rb")
+        await handle.close()
+        await pool.stats()  # bind pool to current loop
+
+        def run_stats_other_loop() -> dict[str, int]:
+            return asyncio.run(pool.stats())
+
+        def run_close_other_loop() -> None:
+            asyncio.run(pool.close())
+
+        with self.assertRaises(PoolStateError):
+            await asyncio.to_thread(run_stats_other_loop)
+        with self.assertRaises(PoolStateError):
+            await asyncio.to_thread(run_close_other_loop)
+
+        await pool.close()

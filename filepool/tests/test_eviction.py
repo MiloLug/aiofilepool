@@ -65,3 +65,63 @@ class FilePoolEvictionTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await h1.close()
                 await h2.close()
+
+    async def test_dirty_eviction_flushes_before_close(self) -> None:
+        p1 = self.tmp_path / "dirty-a.bin"
+        p2 = self.tmp_path / "dirty-b.bin"
+        p1.write_bytes(b"abcdef")
+        p2.write_bytes(b"123456")
+
+        async with FilePool(descriptor_pool_size=1, thread_pool_size=0) as pool:
+            h1 = await pool.open(p1, "rb")
+            h2 = await pool.open(p2, "rb")
+            try:
+                self.assertEqual(await h1.read(1), b"a")
+                record = pool.manager._records[h1._handle_id]  # noqa: SLF001
+                record.dirty = True
+
+                flush_calls = 0
+                original_flush = pool.manager._flush_fd  # noqa: SLF001
+
+                async def tracking_flush(fd):
+                    nonlocal flush_calls
+                    flush_calls += 1
+                    await original_flush(fd)
+
+                pool.manager._flush_fd = tracking_flush  # type: ignore[method-assign] # noqa: SLF001
+                self.assertEqual(await h2.read(1), b"1")
+
+                self.assertEqual(flush_calls, 1)
+                self.assertIsNone(record.fd)
+                self.assertFalse(record.dirty)
+            finally:
+                await h1.close()
+                await h2.close()
+
+    async def test_dirty_eviction_keeps_dirty_on_flush_failure(self) -> None:
+        p1 = self.tmp_path / "fail-a.bin"
+        p2 = self.tmp_path / "fail-b.bin"
+        p1.write_bytes(b"abcdef")
+        p2.write_bytes(b"123456")
+
+        async with FilePool(descriptor_pool_size=1, thread_pool_size=0) as pool:
+            h1 = await pool.open(p1, "rb")
+            h2 = await pool.open(p2, "rb")
+            try:
+                self.assertEqual(await h1.read(1), b"a")
+                record = pool.manager._records[h1._handle_id]  # noqa: SLF001
+                record.dirty = True
+
+                async def fail_flush(_fd):
+                    raise OSError("simulated flush failure")
+
+                pool.manager._flush_fd = fail_flush  # type: ignore[method-assign] # noqa: SLF001
+
+                with self.assertRaises(OSError):
+                    await h2.read(1)
+
+                self.assertIsNotNone(record.fd)
+                self.assertTrue(record.dirty)
+            finally:
+                await h1.close()
+                await h2.close()

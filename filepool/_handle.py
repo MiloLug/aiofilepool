@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import os
 import warnings
-from io import IOBase
-from typing import Awaitable, Callable, TypeVar
+from io import IOBase, UnsupportedOperation
+from typing import TYPE_CHECKING, Awaitable, Callable, TypeVar
 
 from ._errors import HandleClosedError, PoolStateError
 from ._modes import ModeSpec, validate_read_args, validate_write_args
 
 T = TypeVar("T")
+
+if TYPE_CHECKING:
+    from ._pool import FilePool
 
 
 class FileHandle:
@@ -20,7 +23,7 @@ class FileHandle:
     def __init__(
         self,
         *,
-        pool,
+        pool: "FilePool",
         handle_id: int,
         path: str,
         mode_spec: ModeSpec,
@@ -70,11 +73,7 @@ class FileHandle:
             self._ensure_open()
 
             target = self._position if offset is None else offset
-            payload = (
-                bytes(data)
-                if self._mode_spec.binary and isinstance(data, memoryview)
-                else data
-            )
+            payload = data
 
             async def operation(fd: IOBase) -> tuple[int, bool | None]:
                 if self._pool.uses_threads:
@@ -137,6 +136,10 @@ class FileHandle:
     async def truncate(self, size: int | None = None) -> int:
         async with self._op_lock:
             self._ensure_open()
+            if not self._mode_spec.writable:
+                raise UnsupportedOperation(
+                    f"file mode '{self._mode_spec.raw}' does not allow writes"
+                )
             target_size = self._position if size is None else size
             if target_size < 0:
                 raise ValueError("truncate size must be >= 0")
@@ -166,8 +169,20 @@ class FileHandle:
         async with self._op_lock:
             if self._closed:
                 return
+
+            unregister_task = asyncio.create_task(
+                self._pool._unregister_handle(self._handle_id)
+            )
+            try:
+                await asyncio.shield(unregister_task)
+            except asyncio.CancelledError:
+                await unregister_task
+                self._closed = True
+                self._pool._forget_handle(self)
+                raise
+
             self._closed = True
-            await self._pool.manager.unregister(self._handle_id)
+            self._pool._forget_handle(self)
 
     async def __aenter__(self) -> "FileHandle":
         self._ensure_open()
@@ -198,16 +213,16 @@ class FileHandle:
         fd: IOBase | None = None
         dirty: bool | None = None
         try:
-            fd = await self._pool.manager.acquire(self._handle_id)
+            fd = await self._pool._acquire_descriptor(self._handle_id)
             result, dirty = await operation(fd)
             return result
-        except Exception:
+        except BaseException:  # noqa: BLE001
             if dirty_on_error and dirty is None:
                 dirty = True
             raise
         finally:
             if fd is not None:
-                await self._pool.manager.release(
+                await self._pool._release_descriptor(
                     self._handle_id,
                     dirty=dirty,
                     position=self._position,
@@ -260,13 +275,13 @@ class FileHandle:
     def _write_sync(
         fd: IOBase,
         target: int,
-        data: bytes | str | bytearray,
+        data: bytes | str | bytearray | memoryview,
         fsync_on_write: bool,
     ) -> tuple[int, int]:
         fd.seek(target)
         written = fd.write(data)
         if written is None:
-            written = len(data)
+            written = data.nbytes if isinstance(data, memoryview) else len(data)
         fd.flush()
         if fsync_on_write:
             os.fsync(fd.fileno())
@@ -276,15 +291,20 @@ class FileHandle:
         self,
         fd: IOBase,
         target: int,
-        data: bytes | str | bytearray,
+        data: bytes | str | bytearray | memoryview,
     ) -> tuple[int, int]:
         fd.seek(target)
         chunk_size = self._pool.chunk_size
         total = 0
 
         if self._mode_spec.binary:
-            payload = bytes(data)
-            view = memoryview(payload)
+            if isinstance(data, memoryview):
+                try:
+                    view = data.cast("B")
+                except TypeError:
+                    view = memoryview(data.tobytes())
+            else:
+                view = memoryview(data)
             index = 0
             while index < len(view):
                 piece = view[index : index + chunk_size]
@@ -319,7 +339,8 @@ class FileHandle:
 
     @staticmethod
     def _seek_sync(fd: IOBase, current_position: int, offset: int, whence: int) -> int:
-        fd.seek(current_position)
+        if whence == os.SEEK_CUR:
+            fd.seek(current_position)
         return int(fd.seek(offset, whence))
 
     @staticmethod
@@ -344,6 +365,15 @@ class FileHandle:
         if self._closed:
             raise HandleClosedError("file handle is closed")
         self._pool._ensure_open()
+
+    def _mark_closed_by_pool(self) -> None:
+        self._closed = True
+
+    def __repr__(self) -> str:
+        return (
+            f"FileHandle(path={self._path!r}, mode={self._mode_spec.raw!r}, "
+            f"closed={self._closed}, position={self._position})"
+        )
 
     def __del__(self) -> None:
         if getattr(self, "_closed", True):

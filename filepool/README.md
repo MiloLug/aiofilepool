@@ -12,6 +12,7 @@
 - Binary mode supports positional I/O (`offset=`) with pread/pwrite semantics (virtual position is unchanged).
 - Text mode is sequential-only (no positional `offset=`).
 - `await write(...)` always flushes before returning.
+- `await flush()` flushes Python/file buffers only. It does not call `fsync()`.
 
 ## What it does not guarantee
 
@@ -25,7 +26,11 @@
 from filepool import FilePool
 
 async def demo() -> None:
-    async with FilePool(descriptor_pool_size=64, thread_pool_size=4) as pool:
+    async with FilePool(
+        descriptor_pool_size=64,
+        thread_pool_size=4,
+        descriptor_acquire_timeout=2.0,
+    ) as pool:
         async with pool.open("data.bin", "rb") as f:
             blob = await f.read(4096)
 
@@ -48,7 +53,13 @@ async def demo() -> None:
 ## Durability tuning
 
 - `fsync_on_write=False` (default): flush only, faster.
-- `fsync_on_write=True`: flush + fsync on each write/truncate, safer but slower.
+- `fsync_on_write=True`: write/truncate do flush + fsync, safer but slower.
+- `flush()` remains flush-only regardless of `fsync_on_write`.
+
+## Acquire timeout
+
+- `descriptor_acquire_timeout=None` (default): wait indefinitely for descriptor capacity.
+- `descriptor_acquire_timeout=<seconds>`: bounded wait; raises `DescriptorAcquireTimeoutError` when exceeded.
 
 ## Performance tuning
 

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from io import UnsupportedOperation
 from pathlib import Path
+from unittest import mock
 
 from filepool import (
     AppendModePositionalError,
     DataTypeMismatchError,
+    DescriptorAcquireTimeoutError,
     FilePool,
     TextModePositionalError,
 )
@@ -82,3 +85,54 @@ class FilePoolBasicTests(unittest.IsolatedAsyncioTestCase):
             async with pool.open(path, "ab+") as handle:
                 with self.assertRaises(AppendModePositionalError):
                     await handle.write(b"z", offset=0)
+
+    async def test_truncate_requires_writable_mode(self) -> None:
+        path = self.tmp_path / "readonly.bin"
+        path.write_bytes(b"abcdef")
+
+        async with FilePool(descriptor_pool_size=2, thread_pool_size=1) as pool:
+            async with pool.open(path, "rb") as handle:
+                with self.assertRaises(UnsupportedOperation):
+                    await handle.truncate(1)
+
+    async def test_descriptor_acquire_timeout_raises(self) -> None:
+        p1 = self.tmp_path / "h1.bin"
+        p2 = self.tmp_path / "h2.bin"
+        p1.write_bytes(b"a")
+        p2.write_bytes(b"b")
+
+        async with FilePool(
+            descriptor_pool_size=1,
+            thread_pool_size=0,
+            descriptor_acquire_timeout=0.05,
+        ) as pool:
+            h1 = await pool.open(p1, "rb")
+            h2 = await pool.open(p2, "rb")
+            try:
+                await pool._acquire_descriptor(h1._handle_id)  # noqa: SLF001
+                try:
+                    with self.assertRaises(DescriptorAcquireTimeoutError):
+                        await h2.read(1)
+                finally:
+                    await pool._release_descriptor(h1._handle_id, position=0)  # noqa: SLF001
+            finally:
+                await h1.close()
+                await h2.close()
+
+    async def test_flush_is_flush_only_with_fsync_on_write_enabled(self) -> None:
+        path = self.tmp_path / "durability.bin"
+        path.write_bytes(b"abcdef")
+
+        async with FilePool(
+            descriptor_pool_size=2,
+            thread_pool_size=1,
+            fsync_on_write=True,
+        ) as pool:
+            async with pool.open(path, "rb+") as handle:
+                with mock.patch("filepool._handle.os.fsync") as fsync_mock:
+                    await handle.write(b"z", offset=0)
+                    self.assertGreaterEqual(fsync_mock.call_count, 1)
+
+                    fsync_mock.reset_mock()
+                    await handle.flush()
+                    fsync_mock.assert_not_called()
