@@ -1,6 +1,8 @@
 import asyncio
-from io import IOBase
+from contextlib import asynccontextmanager
+from typing import IO, AsyncGenerator
 from aiofilepool._handle import FileHandle
+from aiofilepool.errors import FilePoolClosedError
 
 
 class FileDescriptorManager:
@@ -8,11 +10,12 @@ class FileDescriptorManager:
         assert max_descriptors > 0, "max_descriptors must be >= 1"
 
         self._max_descriptors = max_descriptors
-        self._descriptors: dict[FileHandle, IOBase] = {}
+        self._descriptors: dict[FileHandle, IO] = {}
         self._cold_handles: set[FileHandle] = set()
         self._slots_cond = asyncio.Condition()
         self._slots = max_descriptors
         self._inactive_handles: set[FileHandle] = set()
+        self._closed = False
 
     def _deactivate_handle(self, handle: FileHandle):
         self._cold_handles.discard(handle)
@@ -21,15 +24,43 @@ class FileDescriptorManager:
         fd.close()
         self._inactive_handles.add(handle)
 
-    def _activate_handle(self, handle: FileHandle) -> IOBase:
+    def _activate_handle(self, handle: FileHandle) -> IO:
         self._inactive_handles.discard(handle)
         self._descriptors[handle] = open(handle._path, handle._mode.renewal_mode)
         return self._descriptors[handle]
 
+    async def _discard_handle(self, handle: FileHandle) -> None:
+        self._inactive_handles.discard(handle)
+        if handle not in self._descriptors:
+            return
+
+        try:
+            fd = self._descriptors.pop(handle)
+            fd.flush()
+            fd.close()
+            self._cold_handles.discard(handle)
+        finally:
+            async with self._slots_cond:
+                self._slots += 1
+                self._slots_cond.notify()
+
+    async def _cool_handle(self, handle: FileHandle) -> None:
+        self._cold_handles.add(handle)
+        async with self._slots_cond:
+            self._slots += 1
+            self._slots_cond.notify()
+
+    async def _reheat_handle(self, handle: FileHandle) -> None:
+        self._cold_handles.remove(handle)
+        async with self._slots_cond:
+            self._slots -= 1
+
     async def _ensure_slot(self):
         async with self._slots_cond:
             if self._slots < 1:
-                await self._slots_cond.wait_for(lambda: self._slots > 0)
+                await self._slots_cond.wait_for(lambda: self._closed or self._slots > 0)
+            if self._closed:
+                raise FilePoolClosedError()
             self._slots -= 1
 
         if len(self._descriptors) < self._max_descriptors:
@@ -41,58 +72,66 @@ class FileDescriptorManager:
         handle = self._cold_handles.pop()
         self._deactivate_handle(handle)
 
-    async def _restore_descriptor(self, handle: FileHandle) -> IOBase | None:
+    async def _restore_descriptor(self, handle: FileHandle) -> IO | None:
         if handle in self._descriptors:
             if handle in self._cold_handles:
-                self._cold_handles.discard(handle)
-                async with self._slots_cond:
-                    self._slots -= 1
+                await self._reheat_handle(handle)
             return self._descriptors[handle]
 
-        if handle not in self._inactive_handles:
-            return None
+        if handle in self._inactive_handles:
+            await self._ensure_slot()
+            return self._activate_handle(handle)
 
-        await self._ensure_slot()
-        return self._activate_handle(handle)
+        return None
 
-    async def _open_descriptor(self, handle: FileHandle) -> IOBase:
+    async def _open_descriptor(self, handle: FileHandle) -> IO:
         await self._ensure_slot()
         fd = open(handle._path, handle._mode.mode)
         self._descriptors[handle] = fd
         return fd
 
-    async def acquire(self, handle: FileHandle) -> IOBase:
-        return await self._restore_descriptor(handle) or await self._open_descriptor(
-            handle
-        )
+    @asynccontextmanager
+    async def acquire(self, handle: FileHandle) -> AsyncGenerator[IO]:
+        if self._closed:
+            raise FilePoolClosedError()
+        try:
+            yield (
+                await self._restore_descriptor(handle)
+                or await self._open_descriptor(handle)
+            )
+        finally:
+            await self._release(handle)
 
-    async def release(self, handle: FileHandle) -> None:
-        self._cold_handles.add(handle)
-        async with self._slots_cond:
-            self._slots += 1
-            self._slots_cond.notify()
+    async def _release(self, handle: FileHandle) -> None:
+        if self._closed:
+            await self._discard_handle(handle)
+        else:
+            await self._cool_handle(handle)
 
-    async def close(self, handle: FileHandle) -> None:
-        if handle not in self._descriptors:
-            self._inactive_handles.discard(handle)
+    async def discard(self, handle: FileHandle) -> None:
+        await self._discard_handle(handle)
+
+    async def close(self) -> None:
+        if self._closed:
             return
 
-        fd = self._descriptors.pop(handle)
-        fd.flush()
-        fd.close()
-        self._cold_handles.discard(handle)
         async with self._slots_cond:
-            self._slots += 1
-            self._slots_cond.notify()
+            self._closed = True
+            self._slots_cond.notify_all()
 
-    async def close_all(self) -> None:
-        for fd in self._descriptors.values():
-            fd.flush()
-            fd.close()
-
-        self._descriptors.clear()
-        self._cold_handles.clear()
+        fds_to_close = list(
+            (handle, fd)
+            for handle, fd in self._descriptors.items()
+            if handle in self._cold_handles
+        )
         self._inactive_handles.clear()
-        async with self._slots_cond:
-            self._slots = self._max_descriptors
-            self._slots_cond.notify(self._slots)
+        close_error: BaseException | None = None
+        for handle, fd in fds_to_close:
+            try:
+                await self._discard_handle(handle)
+            except BaseException as exc:  # noqa: BLE001
+                if close_error is None:
+                    close_error = exc
+
+        if close_error is not None:
+            raise close_error

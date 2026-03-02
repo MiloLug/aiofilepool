@@ -18,8 +18,8 @@ def balanced_chunks(
     min_chunk_size: int = 1024,
     max_chunk_size: int = 512 * 1024 * 1024,
 ) -> Iterator[int]:
-    prev_time = 0
-    prev_chunk_rate = 0
+    prev_time: float = 0
+    prev_chunk_rate: float = 0
 
     while data_size > chunk_size * scale:
         current_time = time.perf_counter_ns()

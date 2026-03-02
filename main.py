@@ -8,7 +8,7 @@ data = b"a" * 1024 * 1024
 
 async def normal():
     base = Path(".test-files")
-    for i in range(10000):
+    for i in range(100000):
         with open(base / f"file{i}.bin", "w+b") as f:
             f.write(data)
     print("done")
@@ -18,7 +18,7 @@ async def with_pool():
     base = Path(".test-files")
     async with FilePool() as pool:
         fds: list[FileHandle] = []
-        for i in range(10000):
+        for i in range(100000):
             fds.append(await pool.open(base / f"file{i}.bin", "w+"))
         await asyncio.gather(*[fd.write(data) for fd in fds])
         print("written")
