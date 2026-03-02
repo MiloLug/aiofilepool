@@ -1,4 +1,5 @@
 import asyncio
+from enum import IntEnum
 import functools
 from concurrent.futures.thread import ThreadPoolExecutor
 import os
@@ -7,9 +8,15 @@ from typing import Any, Callable, Self
 from aiofilepool._chunking import balanced_chunks
 from aiofilepool._fd_manager import FileDescriptorManager
 from aiofilepool._handle import FileHandle
-from aiofilepool.errors import FilePoolClosedError
+from aiofilepool.errors import FilePoolNotOpenError
 
 from ._modes import ModeSpec
+
+
+class FilePoolState(IntEnum):
+    OPEN = 0
+    CLOSING = 1
+    CLOSED = 2
 
 
 class FilePool:
@@ -29,7 +36,7 @@ class FilePool:
             else None
         )
         self._fd_manager = FileDescriptorManager(max_descriptors=descriptor_pool_size)
-        self._closed = False
+        self._state = FilePoolState.OPEN
         self._close_task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> Self:
@@ -40,13 +47,15 @@ class FilePool:
 
     async def close(self) -> None:
         if self._close_task is None:
+            self._state = FilePoolState.CLOSING
             self._close_task = asyncio.create_task(self._close_internal())
         try:
             await asyncio.shield(self._close_task)
         except asyncio.CancelledError:
             await self._close_task
-            self._closed = True
             raise
+        else:
+            self._state = FilePoolState.CLOSED
 
     async def _close_handle(self, handle: FileHandle) -> None:
         await self._fd_manager.discard(handle)
@@ -68,12 +77,12 @@ class FilePool:
             await coro_result
             raise
 
-    def _ensure_open(self) -> None:
-        if self._closed:
-            raise FilePoolClosedError()
+    def _open_guard(self) -> None:
+        if self._state != FilePoolState.OPEN:
+            raise FilePoolNotOpenError()
 
     async def _read(self, handle: FileHandle, size: int, offset: int) -> bytes:
-        self._ensure_open()
+        self._open_guard()
         async with self._fd_manager.acquire(handle) as fd:
             fd.seek(offset)
             if size < self._chunk_size:
@@ -88,7 +97,7 @@ class FilePool:
     async def _write(
         self, handle: FileHandle, data: bytes, offset: int
     ) -> tuple[int, BaseException | None]:
-        self._ensure_open()
+        self._open_guard()
         written = 0
         error: BaseException | None = None
         async with self._fd_manager.acquire(handle) as fd:
@@ -106,7 +115,7 @@ class FilePool:
         return written, error
 
     async def _truncate(self, handle: FileHandle, size: int) -> None:
-        self._ensure_open()
+        self._open_guard()
         async with self._fd_manager.acquire(handle) as fd:
             await self._run_blocking(fd.truncate, size)
 
@@ -115,8 +124,7 @@ class FilePool:
         path: str | os.PathLike[str],
         mode: str,
     ) -> FileHandle:
-        if self._closed:
-            raise FilePoolClosedError()
+        self._open_guard()
         mode_spec = ModeSpec.from_str(mode)
         return FileHandle(
             pool=self,
@@ -125,7 +133,13 @@ class FilePool:
         )
 
     async def _close_internal(self) -> None:
-        await self._fd_manager.close()
+        close_error: BaseException | None = None
+        try:
+            await self._fd_manager.close()
+        except BaseException as e:
+            if close_error is None:
+                close_error = e
+
         if self._executor is not None:
             executor = self._executor
             self._executor = None
@@ -137,3 +151,6 @@ class FilePool:
                     cancel_futures=False,
                 ),
             )
+
+        if close_error is not None:
+            raise close_error

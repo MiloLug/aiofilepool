@@ -16,7 +16,7 @@ async def normal():
 
 async def with_pool():
     base = Path(".test-files")
-    async with FilePool() as pool:
+    async with FilePool(descriptor_pool_size=1024, thread_pool_size=8) as pool:
         fds: list[FileHandle] = []
         for i in range(100000):
             fds.append(await pool.open(base / f"file{i}.bin", "w+"))

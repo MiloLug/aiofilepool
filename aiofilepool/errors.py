@@ -22,5 +22,5 @@ class InvalidFilePositionError(FilePoolError):
     message = "invalid file position"
 
 
-class FilePoolClosedError(FilePoolError):
-    message = "file pool is closed"
+class FilePoolNotOpenError(FilePoolError):
+    message = "file pool is not open"
