@@ -1,10 +1,12 @@
 import asyncio
-import math
+from concurrent.futures.thread import ThreadPoolExecutor
 import os
-from typing import Self
+from typing import Any, Callable, Self
 
+from aiofilepool._chunking import balanced_chunks
 from aiofilepool._fd_manager import FileDescriptorManager
 from aiofilepool._handle import FileHandle
+from aiofilepool.errors import FilePoolClosedError
 
 from ._modes import ModeSpec
 
@@ -12,15 +14,21 @@ from ._modes import ModeSpec
 class FilePool:
     def __init__(
         self,
-        descriptor_pool_size: int = 256,
+        descriptor_pool_size: int = 128,
         thread_pool_size: int = 4,
-        chunk_size: int = 64 * 1024 * 1024,
-        fsync_on_write: bool = False,
+        max_chunk_size: int = 128 * 1024 * 1024,
+        loop: asyncio.AbstractEventLoop | None = None,
     ):
         self._thread_pool_size = thread_pool_size
-        self._chunk_size = chunk_size
-        self._fsync_on_write = fsync_on_write
+        self._chunk_size = max_chunk_size
+        self._loop = loop or asyncio.get_running_loop()
+        self._executor: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(max_workers=thread_pool_size)
+            if thread_pool_size > 0
+            else None
+        )
         self._fd_manager = FileDescriptorManager(max_descriptors=descriptor_pool_size)
+        self._closed = False
 
     async def __aenter__(self) -> Self:
         return self
@@ -29,29 +37,46 @@ class FilePool:
         await self.close()
 
     async def close(self) -> None:
-        self._fd_manager.close_all()
+        if self._closed:
+            return
+        await self._fd_manager.close_all()
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=False)
+            self._executor = None
+        self._closed = True
 
     async def _close_handle(self, handle: FileHandle) -> None:
-        self._fd_manager.close(handle)
+        await self._fd_manager.close(handle)
 
     async def _get_stats(self, path: str) -> os.stat_result:
         stat = os.stat(path)
         return stat
 
+    async def _run_blocking[T](self, func: Callable[..., T], *args: Any) -> T:
+        if self._executor is None:
+            result = func(*args)
+            await asyncio.sleep(0)
+            return result
+
+        result = self._loop.run_in_executor(self._executor, func, *args)
+        try:
+            return await asyncio.shield(result)
+        except asyncio.CancelledError:
+            await result
+            raise
+
     async def _read(self, handle: FileHandle, size: int, offset: int) -> bytes:
-        fd = self._fd_manager.acquire(handle)
+        fd = await self._fd_manager.acquire(handle)
         try:
             fd.seek(offset)
-            data = bytearray()
-            chunks = math.ceil(size / self._chunk_size)
-            rest = size % self._chunk_size
-            for _ in range(chunks - 1):
-                data.extend(fd.read(self._chunk_size))
-                await asyncio.sleep(0)
-            if rest > 0:
-                data.extend(fd.read(rest))
+            if size < self._chunk_size:
+                data = await self._run_blocking(fd.read, size)
+            else:
+                data = bytearray()
+                for chunk_size in balanced_chunks(size, self._chunk_size):
+                    data.extend(await self._run_blocking(fd.read, chunk_size))
         finally:
-            self._fd_manager.release(handle)
+            await self._fd_manager.release(handle)
 
         return bytes(data)
 
@@ -60,38 +85,36 @@ class FilePool:
     ) -> tuple[int, Exception | None]:
         written = 0
         error = None
-        chunks = math.ceil(len(data) / self._chunk_size)
-        rest = len(data) % self._chunk_size
-
-        fd = self._fd_manager.acquire(handle)
-        fd.seek(offset)
+        fd = await self._fd_manager.acquire(handle)
         try:
-            for i in range(chunks - 1):
-                written += fd.write(
-                    data[i * self._chunk_size : (i + 1) * self._chunk_size]
-                )
-                await asyncio.sleep(0)
-            if rest > 0:
-                written += fd.write(data[-rest:])
-        except Exception as e:
+            fd.seek(offset)
+            if len(data) < self._chunk_size:
+                written = await self._run_blocking(fd.write, data)
+            else:
+                for chunk_size in balanced_chunks(len(data), self._chunk_size):
+                    written += await self._run_blocking(fd.write, data[:chunk_size])
+                    data = data[chunk_size:]
+        except BaseException as e:
             error = e
         finally:
-            self._fd_manager.release(handle)
+            await self._fd_manager.release(handle)
 
         return written, error
 
     async def _truncate(self, handle: FileHandle, size: int) -> None:
-        fd = self._fd_manager.acquire(handle)
+        fd = await self._fd_manager.acquire(handle)
         try:
-            fd.truncate(size)
+            await self._run_blocking(fd.truncate, size)
         finally:
-            self._fd_manager.release(handle)
+            await self._fd_manager.release(handle)
 
     def open(
         self,
         path: str | os.PathLike[str],
         mode: str,
     ) -> FileHandle:
+        if self._closed:
+            raise FilePoolClosedError()
         mode_spec = ModeSpec.from_str(mode)
         return FileHandle(
             pool=self,

@@ -13,7 +13,7 @@ class ModeSpec:
         self.read = read
         self.write = write
         self.truncate = truncate
-        self.mode = f"{'r' if read and not truncate else ''}{'w' if write and truncate else ''}{'+' if write and not truncate else ''}b"
+        self.mode = f"{'r' if read and not truncate else ''}{'w' if write and truncate else ''}{'+' if write and read else ''}b"
         self.renewal_mode = f"r{'+' if write else ''}b"
 
     @classmethod

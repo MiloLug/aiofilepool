@@ -1,25 +1,27 @@
-from aiofilepool import FilePool
+from pathlib import Path
+from aiofilepool import FileHandle, FilePool
 import asyncio
 import time
 
+data = b"a" * 1024 * 1024
+
 
 async def normal():
-    with (
-        open("D:\\Downloads\\smallD.mkv", "rb") as f,
-        open("D:\\Downloads\\smallD2.mkv", "rb") as f2,
-    ):
-        f.read()
-        f2.read()
+    base = Path(".test-files")
+    for i in range(10000):
+        with open(base / f"file{i}.bin", "w+b") as f:
+            f.write(data)
     print("done")
 
 
 async def with_pool():
+    base = Path(".test-files")
     async with FilePool() as pool:
-        async with (
-            pool.open("D:\\Downloads\\smallD.mkv", "r") as f,
-            pool.open("D:\\Downloads\\smallD2.mkv", "r") as f2,
-        ):
-            await asyncio.gather(f.read(), f2.read())
+        fds: list[FileHandle] = []
+        for i in range(10000):
+            fds.append(await pool.open(base / f"file{i}.bin", "w+"))
+        await asyncio.gather(*[fd.write(data) for fd in fds])
+        print("written")
     print("done")
 
 
@@ -27,7 +29,11 @@ async def main():
     start = time.time()
     await with_pool()
     end = time.time()
-    print("Time taken: ", end - start)
+    print("Pool Time taken: ", end - start)
+    start = time.time()
+    await normal()
+    end = time.time()
+    print("Normal Time taken: ", end - start)
 
 
 if __name__ == "__main__":
