@@ -6,15 +6,14 @@ from aiofilepool.errors import InvalidFileModeError
 class ModeSpec:
     __slots__ = ("read", "write", "truncate", "mode", "renewal_mode")
 
-    def __init__(self, read: bool, write: bool, truncate: bool):
-        if not read and not write:
-            raise InvalidFileModeError("mode must be at least read or write")
-
+    def __init__(
+        self, read: bool, write: bool, truncate: bool, mode: str, renewal_mode: str
+    ):
         self.read = read
         self.write = write
         self.truncate = truncate
-        self.mode = f"{'r' if read and not truncate else ''}{'w' if write and truncate else ''}{'+' if write and read else ''}b"
-        self.renewal_mode = f"r{'+' if write else ''}b"
+        self.mode = mode
+        self.renewal_mode = renewal_mode
 
     @classmethod
     def from_str(cls, mode: str) -> Self:
@@ -22,8 +21,15 @@ class ModeSpec:
         has_w = "w" in mode
         has_plus = "+" in mode
 
+        if has_r and has_w:
+            raise InvalidFileModeError("mode cannot contain both 'r' and 'w'")
+        if not (has_r or has_w):
+            raise InvalidFileModeError("mode must be at least read or write")
+
         return cls(
             read=has_r or has_plus,
             write=has_w or has_plus,
             truncate=has_w,
+            mode="".join(set(mode) & set("rwx+")) + "b",
+            renewal_mode=f"r{'+' if has_w else ''}b",
         )

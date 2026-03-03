@@ -7,7 +7,8 @@ from aiofilepool.errors import FilePoolNotOpenError
 
 class FileDescriptorManager:
     def __init__(self, max_descriptors: int):
-        assert max_descriptors > 0, "max_descriptors must be >= 1"
+        if max_descriptors < 1:
+            raise ValueError("max_descriptors must be >= 1")
 
         self._max_descriptors = max_descriptors
         self._descriptors: dict[FileHandle, IO] = {}
@@ -21,7 +22,7 @@ class FileDescriptorManager:
         async with self._slots_cond:
             self._slots += 1
             assert self._slots <= self._max_descriptors, (
-                "Slots cannot exceed max descriptors"
+                "Impossible state: slots cannot exceed max descriptors"
             )
             self._slots_cond.notify()
 
@@ -78,6 +79,7 @@ class FileDescriptorManager:
         self._cold_handles.remove(handle)
         async with self._slots_cond:
             self._slots -= 1
+            assert self._slots >= 0, "Impossible state: slots cannot be negative"
 
     async def _restore_descriptor(self, handle: FileHandle) -> IO | None:
         if handle in self._descriptors:
@@ -122,7 +124,7 @@ class FileDescriptorManager:
     async def discard(self, handle: FileHandle) -> None:
         await self._discard_handle(handle)
 
-    async def close(self) -> None:
+    async def close(self, timeout: float | None = None) -> None:
         if self._closed:
             return
 
@@ -140,7 +142,10 @@ class FileDescriptorManager:
 
         self._inactive_handles.clear()
         async with self._slots_cond:
-            await self._slots_cond.wait_for(lambda: len(self._descriptors) == 0)
+            await asyncio.wait_for(
+                self._slots_cond.wait_for(lambda: len(self._descriptors) == 0),
+                timeout=timeout,
+            )
 
         if close_error is not None:
             raise close_error

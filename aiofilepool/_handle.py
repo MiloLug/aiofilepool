@@ -1,3 +1,4 @@
+import asyncio
 from enum import IntEnum
 import os
 from typing import TYPE_CHECKING
@@ -28,6 +29,7 @@ class FileHandle:
         self._position = 0
         self._size = 0
         self._state = FileHandleState.UNINITIALIZED
+        self._op_lock = asyncio.Lock()
 
     def __await__(self):
         return self._initialize().__await__()
@@ -50,44 +52,46 @@ class FileHandle:
         return self
 
     async def read(self, size: int | None = None, offset: int | None = None) -> bytes:
-        if not self._mode.read:
-            raise InvalidFileModeError("file is not readable")
-        if self._state != FileHandleState.OPEN:
-            raise FileHandleNotOpenError()
+        async with self._op_lock:
+            if not self._mode.read:
+                raise InvalidFileModeError("file is not readable")
+            if self._state != FileHandleState.OPEN:
+                raise FileHandleNotOpenError()
 
-        if offset is not None:
-            if offset < 0:
-                raise InvalidFilePositionError("offset must be >= 0")
-        else:
-            offset = self._position
+            if offset is not None:
+                if offset < 0:
+                    raise InvalidFilePositionError("offset must be >= 0")
+            else:
+                offset = self._position
 
-        if size is not None:
-            if size < 0:
-                raise InvalidFilePositionError("size must be >= 0")
-        else:
-            size = self._size - offset
+            if size is not None:
+                if size < 0:
+                    raise InvalidFilePositionError("size must be >= 0")
+            else:
+                size = self._size - offset
 
-        self._position = offset + size
-        return await self._pool._read(self, size, offset)
+            self._position = offset + size
+            return await self._pool._read(self, size, offset)
 
     async def write(self, data: bytes, offset: int | None = None) -> int:
-        if not self._mode.write:
-            raise InvalidFileModeError("file is not writable")
-        if self._state != FileHandleState.OPEN:
-            raise FileHandleNotOpenError()
+        async with self._op_lock:
+            if not self._mode.write:
+                raise InvalidFileModeError("file is not writable")
+            if self._state != FileHandleState.OPEN:
+                raise FileHandleNotOpenError()
 
-        if offset is not None:
-            if offset < 0:
-                raise InvalidFilePositionError("offset must be >= 0")
-        else:
-            offset = self._position
+            if offset is not None:
+                if offset < 0:
+                    raise InvalidFilePositionError("offset must be >= 0")
+            else:
+                offset = self._position
 
-        written_size, error = await self._pool._write(self, data, offset)
-        self._size = max(self._size, offset + written_size)
-        self._position = offset + written_size
-        if error:
-            raise error
-        return written_size
+            written_size, error = await self._pool._write(self, data, offset)
+            self._size = max(self._size, offset + written_size)
+            self._position = offset + written_size
+            if error:
+                raise error
+            return written_size
 
     async def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
         position = self._position
@@ -97,7 +101,7 @@ class FileHandle:
             case os.SEEK_CUR:
                 position += offset
             case os.SEEK_END:
-                position = self._size - offset
+                position = self._size + offset
             case _:
                 raise InvalidFilePositionError("invalid whence")
 
@@ -112,23 +116,25 @@ class FileHandle:
         return self._position
 
     async def truncate(self, size: int | None = None) -> None:
-        if not self._mode.write:
-            raise InvalidFileModeError("file is not writable")
-        if self._state != FileHandleState.OPEN:
-            raise FileHandleNotOpenError()
+        async with self._op_lock:
+            if not self._mode.write:
+                raise InvalidFileModeError("file is not writable")
+            if self._state != FileHandleState.OPEN:
+                raise FileHandleNotOpenError()
 
-        size = size if size is not None else self._position
-        if size < 0:
-            raise InvalidFilePositionError("truncate size must be >= 0")
+            size = size if size is not None else self._position
+            if size < 0:
+                raise InvalidFilePositionError("truncate size must be >= 0")
 
-        await self._pool._truncate(self, size)
-        self._size = self._position = size
+            await self._pool._truncate(self, size)
+            self._size = self._position = size
 
     async def close(self) -> None:
-        if self._state != FileHandleState.OPEN:
-            raise FileHandleNotOpenError()
-        await self._pool._close_handle(self)
-        self._state = FileHandleState.CLOSED
+        async with self._op_lock:
+            if self._state != FileHandleState.OPEN:
+                return
+            await self._pool._close_handle(self)
+            self._state = FileHandleState.CLOSED
 
     def __hash__(self) -> int:
         return id(self)

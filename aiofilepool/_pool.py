@@ -5,7 +5,7 @@ from concurrent.futures.thread import ThreadPoolExecutor
 import os
 from typing import Any, Callable, Self
 
-from aiofilepool._chunking import balanced_chunks
+from aiofilepool._chunking import BalancedChunker, Chunker
 from aiofilepool._fd_manager import FileDescriptorManager
 from aiofilepool._handle import FileHandle
 from aiofilepool.errors import FilePoolNotOpenError
@@ -24,11 +24,20 @@ class FilePool:
         self,
         descriptor_pool_size: int = 128,
         thread_pool_size: int = 4,
-        max_chunk_size: int = 128 * 1024 * 1024,
         loop: asyncio.AbstractEventLoop | None = None,
+        chunker: Chunker | None = BalancedChunker(),
+        chunking_threshold: int = 128 * 1024 * 1024,
     ):
+        """
+        Args:
+            descriptor_pool_size: The maximum number of file descriptors to use.
+            thread_pool_size: The maximum number of threads to use.
+                If 0, no threads will be used.
+            loop: The event loop to use.
+            chunker: The chunker to use.
+            chunking_threshold: The size threshold at which to use chunking.
+        """
         self._thread_pool_size = thread_pool_size
-        self._chunk_size = max_chunk_size
         self._loop = loop or asyncio.get_running_loop()
         self._executor: ThreadPoolExecutor | None = (
             ThreadPoolExecutor(max_workers=thread_pool_size)
@@ -38,6 +47,8 @@ class FilePool:
         self._fd_manager = FileDescriptorManager(max_descriptors=descriptor_pool_size)
         self._state = FilePoolState.OPEN
         self._close_task: asyncio.Task[None] | None = None
+        self._chunker = chunker
+        self._chunking_threshold = chunking_threshold
 
     async def __aenter__(self) -> Self:
         return self
@@ -45,12 +56,12 @@ class FilePool:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
-    async def close(self) -> None:
+    async def close(self, timeout: float | None = None) -> None:
         if self._close_task is None:
             self._state = FilePoolState.CLOSING
             self._close_task = asyncio.create_task(self._close_internal())
         try:
-            await asyncio.shield(self._close_task)
+            await asyncio.wait_for(asyncio.shield(self._close_task), timeout=timeout)
         except asyncio.CancelledError:
             await self._close_task
             raise
@@ -61,7 +72,7 @@ class FilePool:
         await self._fd_manager.discard(handle)
 
     async def _get_stats(self, path: str) -> os.stat_result:
-        stat = os.stat(path)
+        stat = await self._run_blocking(os.stat, path)
         return stat
 
     async def _run_blocking[T](self, func: Callable[..., T], *args: Any) -> T:
@@ -85,11 +96,11 @@ class FilePool:
         self._open_guard()
         async with self._fd_manager.acquire(handle) as fd:
             fd.seek(offset)
-            if size < self._chunk_size:
+            if size < self._chunking_threshold:
                 data = await self._run_blocking(fd.read, size)
             else:
                 data = bytearray()
-                for chunk_size in balanced_chunks(size, self._chunk_size):
+                for chunk_size in self._chunker(size):
                     data.extend(await self._run_blocking(fd.read, chunk_size))
 
         return bytes(data)
@@ -103,12 +114,13 @@ class FilePool:
         async with self._fd_manager.acquire(handle) as fd:
             try:
                 fd.seek(offset)
-                if len(data) < self._chunk_size:
+                if len(data) < self._chunking_threshold:
                     written = await self._run_blocking(fd.write, data)
                 else:
-                    for chunk_size in balanced_chunks(len(data), self._chunk_size):
-                        written += await self._run_blocking(fd.write, data[:chunk_size])
-                        data = data[chunk_size:]
+                    for chunk_size in self._chunker(len(data)):
+                        written += await self._run_blocking(
+                            fd.write, data[written : written + chunk_size]
+                        )
             except BaseException as e:
                 error = e
 
