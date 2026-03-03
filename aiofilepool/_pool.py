@@ -25,7 +25,7 @@ class FilePool:
         descriptor_pool_size: int = 128,
         thread_pool_size: int = 4,
         loop: asyncio.AbstractEventLoop | None = None,
-        chunker: Chunker | None = BalancedChunker(),
+        chunker: Chunker = BalancedChunker(),
         chunking_threshold: int = 128 * 1024 * 1024,
     ):
         """
