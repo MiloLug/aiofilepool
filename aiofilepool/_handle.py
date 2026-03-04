@@ -162,6 +162,8 @@ class FileHandle(AsyncBinaryIO):
         chunking_threshold: int | None = None,
     ) -> AsyncGenerator[bytes, None]:
         async with self._op_lock:
+            if not self._mode.read:
+                raise InvalidFileModeError("file is not readable")
             if self._state != AsyncIOState.OPEN:
                 raise IONotOpenError()
 
@@ -185,11 +187,19 @@ class FileHandle(AsyncBinaryIO):
 
             async with self._acquire_fd() as fd:
                 fd.seek(offset)
-                if size < chunking_threshold:
-                    yield await self._pool._run_blocking(fd.read, size)
-                else:
-                    for chunk_size in chunker(size):
-                        yield await self._pool._run_blocking(fd.read, chunk_size)
+                consumed_size = 0
+                try:
+                    if size < chunking_threshold:
+                        data = await self._pool._run_blocking(fd.read, size)
+                        consumed_size += len(data)
+                        yield data
+                    else:
+                        for chunk_size in chunker(size):
+                            data = await self._pool._run_blocking(fd.read, chunk_size)
+                            consumed_size += len(data)
+                            yield data
+                finally:
+                    self._position = offset + consumed_size
 
     async def close(self) -> None:
         async with self._op_lock:

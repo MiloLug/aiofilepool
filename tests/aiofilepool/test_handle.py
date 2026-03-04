@@ -9,6 +9,7 @@ from aiofilepool.errors import (
     InvalidFileModeError,
     InvalidPositionError,
 )
+from .conftest import RecordingChunker
 
 
 pytestmark = pytest.mark.asyncio
@@ -166,3 +167,87 @@ async def test_open_handle_operations_fail_after_pool_close(
         await handle.write(b"x")
     with pytest.raises(FilePoolNotOpenError):
         await handle.read(1, 0)
+
+
+async def test_handle_chunks_small_read_returns_single_chunk_and_advances_position(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("chunks-small.bin", b"abcdef")
+
+    async with pool_factory(chunking_threshold=10) as pool:
+        handle = await pool.open(path, "r")
+        chunks = [chunk async for chunk in handle.chunks(size=3, offset=1)]
+
+        assert chunks == [b"bcd"]
+        assert await handle.tell() == 4
+
+
+async def test_handle_chunks_uses_custom_chunker_for_large_reads(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("chunks-large.bin", b"abcdef")
+    chunker = RecordingChunker([2, 2, 2])
+
+    async with pool_factory(chunking_threshold=4, chunker=chunker) as pool:
+        handle = await pool.open(path, "r")
+        chunks = [
+            chunk
+            async for chunk in handle.chunks(size=6, offset=0, chunking_threshold=4)
+        ]
+
+        assert chunks == [b"ab", b"cd", b"ef"]
+        assert chunker.calls == [6]
+        assert await handle.tell() == 6
+
+
+async def test_handle_chunks_defaults_to_current_position_and_eof(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("chunks-default-window.bin", b"abcdef")
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "r")
+        await handle.seek(2)
+
+        chunks = [chunk async for chunk in handle.chunks()]
+
+        assert chunks == [b"cdef"]
+        assert await handle.tell() == 6
+
+
+async def test_handle_chunks_negative_offset_or_size_raises_invalid_position(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("chunks-invalid-position.bin", b"abcdef")
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "r")
+
+        with pytest.raises(InvalidPositionError, match="offset must be >= 0"):
+            [chunk async for chunk in handle.chunks(size=1, offset=-1)]
+        with pytest.raises(InvalidPositionError, match="size must be >= 0"):
+            [chunk async for chunk in handle.chunks(size=-1, offset=0)]
+
+
+async def test_handle_chunks_closed_handle_raises_not_open(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("chunks-closed.bin", b"abcdef")
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "r")
+        await handle.close()
+
+        with pytest.raises(IONotOpenError):
+            [chunk async for chunk in handle.chunks()]
+
+
+async def test_handle_chunks_write_only_handle_raises_invalid_mode(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("chunks-write-only.bin", b"")
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "w")
+        with pytest.raises(InvalidFileModeError, match="file is not readable"):
+            [chunk async for chunk in handle.chunks()]

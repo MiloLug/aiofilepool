@@ -157,11 +157,19 @@ class BinaryIOAdapter(AsyncBinaryIO):
                 chunking_threshold = self._pool._chunking_threshold
 
             self._io.seek(offset)
-            if size < chunking_threshold:
-                yield await self._pool._run_blocking(self._io.read, size)
-            else:
-                for chunk_size in chunker(size):
-                    yield await self._pool._run_blocking(self._io.read, chunk_size)
+            consumed_size = 0
+            try:
+                if size < chunking_threshold:
+                    data = await self._pool._run_blocking(self._io.read, size)
+                    consumed_size += len(data)
+                    yield data
+                else:
+                    for chunk_size in chunker(size):
+                        data = await self._pool._run_blocking(self._io.read, chunk_size)
+                        consumed_size += len(data)
+                        yield data
+            finally:
+                self._position = offset + consumed_size
 
     async def close(self) -> None:
         if self._state != AsyncIOState.OPEN:

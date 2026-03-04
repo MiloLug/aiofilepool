@@ -153,3 +153,97 @@ async def test_adapter_close_is_idempotent_and_does_not_close_underlying_io(
             await adapter.read(1, 0)
         with pytest.raises(IONotOpenError):
             await adapter.write(b"x")
+
+
+async def test_adapter_chunks_small_read_returns_single_chunk_and_advances_position(
+    pool_factory, binary_io_factory
+) -> None:
+    async with pool_factory(chunking_threshold=10) as pool:
+        adapter, _ = binary_io_factory(pool, b"abcdef")
+        adapter = await adapter
+
+        chunks = [chunk async for chunk in adapter.chunks(size=3, offset=1)]
+
+        assert chunks == [b"bcd"]
+        assert await adapter.tell() == 4
+
+
+async def test_adapter_chunks_uses_custom_chunker_for_large_reads(
+    pool_factory, binary_io_factory
+) -> None:
+    chunker = RecordingChunker([2, 2, 2])
+
+    async with pool_factory(chunking_threshold=4, chunker=chunker) as pool:
+        adapter, _ = binary_io_factory(pool, b"abcdef")
+        adapter = await adapter
+
+        chunks = [
+            chunk
+            async for chunk in adapter.chunks(size=6, offset=0, chunking_threshold=4)
+        ]
+
+        assert chunks == [b"ab", b"cd", b"ef"]
+        assert chunker.calls == [6]
+        assert await adapter.tell() == 6
+
+
+async def test_adapter_chunks_defaults_to_current_position_and_eof(
+    pool_factory, binary_io_factory
+) -> None:
+    async with pool_factory() as pool:
+        adapter, _ = binary_io_factory(pool, b"abcdef")
+        adapter = await adapter
+        await adapter.seek(2)
+
+        chunks = [chunk async for chunk in adapter.chunks()]
+
+        assert chunks == [b"cdef"]
+        assert await adapter.tell() == 6
+
+
+async def test_adapter_chunks_negative_offset_or_size_raises_invalid_position(
+    pool_factory, binary_io_factory
+) -> None:
+    async with pool_factory() as pool:
+        adapter, _ = binary_io_factory(pool, b"abcdef")
+        adapter = await adapter
+
+        with pytest.raises(InvalidPositionError, match="offset must be >= 0"):
+            [chunk async for chunk in adapter.chunks(size=1, offset=-1)]
+        with pytest.raises(InvalidPositionError, match="size must be >= 0"):
+            [chunk async for chunk in adapter.chunks(size=-1, offset=0)]
+
+
+async def test_adapter_chunks_closed_adapter_raises_not_open(
+    pool_factory, binary_io_factory
+) -> None:
+    async with pool_factory() as pool:
+        adapter, _ = binary_io_factory(pool, b"abcdef")
+        adapter = await adapter
+        await adapter.close()
+
+        with pytest.raises(IONotOpenError):
+            [chunk async for chunk in adapter.chunks()]
+
+
+@pytest.mark.parametrize("thread_pool_size", [0, 2])
+async def test_adapter_chunks_in_threaded_and_threadless_modes(
+    thread_pool_size: int, pool_factory, binary_io_factory
+) -> None:
+    async with pool_factory(
+        thread_pool_size=thread_pool_size, chunking_threshold=4
+    ) as pool:
+        adapter, _ = binary_io_factory(pool, b"abcdef")
+        adapter = await adapter
+        chunker = RecordingChunker([4, 2])
+
+        chunks = [
+            chunk
+            async for chunk in adapter.chunks(
+                size=6, offset=0, chunker=chunker, chunking_threshold=4
+            )
+        ]
+
+        assert chunks == [b"abcd", b"ef"]
+        assert chunker.calls == [6]
+        assert await adapter.tell() == 6
