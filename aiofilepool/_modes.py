@@ -20,6 +20,7 @@ class ModeSpec:
         has_r = "r" in mode
         has_w = "w" in mode
         has_plus = "+" in mode
+        writable = has_w or has_plus
 
         if has_r and has_w:
             raise InvalidFileModeError("mode cannot contain both 'r' and 'w'")
@@ -28,8 +29,8 @@ class ModeSpec:
 
         return cls(
             read=has_r or has_plus,
-            write=has_w or has_plus,
+            write=writable,
             truncate=has_w,
             mode="".join(set(mode) & set("rwx+")) + "b",
-            renewal_mode=f"r{'+' if has_w else ''}b",
+            renewal_mode=f"r{'+' if writable else ''}b",
         )

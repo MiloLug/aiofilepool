@@ -10,15 +10,15 @@ class InvalidFileModeError(FilePoolError):
     message = "invalid file mode"
 
 
-class FileHandleNotOpenError(FilePoolError):
+class IONotOpenError(FilePoolError):
     message = "file handle is not open"
 
 
-class FileHandleInitializedError(FilePoolError):
+class IOInitializedError(FilePoolError):
     message = "file handle is already initialized"
 
 
-class InvalidFilePositionError(FilePoolError):
+class InvalidPositionError(FilePoolError):
     message = "invalid file position"
 
 

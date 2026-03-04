@@ -8,7 +8,7 @@ from aiofilepool.errors import InvalidFileModeError
     ("mode", "read", "write", "truncate", "flags", "renewal_mode"),
     [
         ("r", True, False, False, {"r"}, "rb"),
-        ("r+", True, True, False, {"r", "+"}, "rb"),
+        ("r+", True, True, False, {"r", "+"}, "r+b"),
         ("w", False, True, True, {"w"}, "r+b"),
         ("w+", True, True, True, {"w", "+"}, "r+b"),
     ],

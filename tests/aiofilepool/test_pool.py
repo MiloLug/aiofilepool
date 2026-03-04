@@ -5,18 +5,10 @@ import pytest
 from aiofilepool._pool import FilePoolState
 from aiofilepool.errors import FilePoolNotOpenError
 
+from .conftest import RecordingChunker
+
 
 pytestmark = pytest.mark.asyncio
-
-
-class RecordingChunker:
-    def __init__(self, chunks: list[int]):
-        self._chunks = chunks
-        self.calls: list[int] = []
-
-    def __call__(self, data_size: int):
-        self.calls.append(data_size)
-        return iter(self._chunks)
 
 
 async def test_pool_context_manager_closes_and_close_is_idempotent(
@@ -43,6 +35,14 @@ async def test_open_after_close_raises_not_open(pool_factory, file_writer) -> No
 
     with pytest.raises(FilePoolNotOpenError):
         pool.open(path, "w+")
+
+
+async def test_stat_returns_size_for_existing_file(pool_factory, file_writer) -> None:
+    path = file_writer("stats.bin", b"abcdef")
+
+    async with pool_factory() as pool:
+        stat = await pool.stat(path)
+        assert stat.st_size == 6
 
 
 async def test_threadless_mode_read_write_still_works(

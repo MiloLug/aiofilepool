@@ -41,7 +41,7 @@ def test_balanced_chunker_validates_constructor_inputs(
     kwargs: dict[str, float | int], message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        BalancedChunker(**kwargs)
+        BalancedChunker(**kwargs)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("data_size", [1, 7, 64, 129])

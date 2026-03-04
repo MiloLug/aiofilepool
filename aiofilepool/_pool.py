@@ -3,8 +3,10 @@ from enum import IntEnum
 import functools
 from concurrent.futures.thread import ThreadPoolExecutor
 import os
-from typing import Any, Callable, Self
+from pathlib import Path
+from typing import Any, BinaryIO, Callable, Self
 
+from aiofilepool._binary_io import BinaryIOAdapter
 from aiofilepool._chunking import BalancedChunker, Chunker
 from aiofilepool._fd_manager import FileDescriptorManager
 from aiofilepool._handle import FileHandle
@@ -68,11 +70,8 @@ class FilePool:
         else:
             self._state = FilePoolState.CLOSED
 
-    async def _close_handle(self, handle: FileHandle) -> None:
-        await self._fd_manager.discard(handle)
-
-    async def _get_stats(self, path: str) -> os.stat_result:
-        stat = await self._run_blocking(os.stat, path)
+    async def stat(self, path: Path | str) -> os.stat_result:
+        stat = await self._run_blocking(os.stat, os.fspath(path))
         return stat
 
     async def _run_blocking[T](self, func: Callable[..., T], *args: Any) -> T:
@@ -92,45 +91,6 @@ class FilePool:
         if self._state != FilePoolState.OPEN:
             raise FilePoolNotOpenError()
 
-    async def _read(self, handle: FileHandle, size: int, offset: int) -> bytes:
-        self._open_guard()
-        async with self._fd_manager.acquire(handle) as fd:
-            fd.seek(offset)
-            if size < self._chunking_threshold:
-                data = await self._run_blocking(fd.read, size)
-            else:
-                data = bytearray()
-                for chunk_size in self._chunker(size):
-                    data.extend(await self._run_blocking(fd.read, chunk_size))
-
-        return bytes(data)
-
-    async def _write(
-        self, handle: FileHandle, data: bytes, offset: int
-    ) -> tuple[int, BaseException | None]:
-        self._open_guard()
-        written = 0
-        error: BaseException | None = None
-        async with self._fd_manager.acquire(handle) as fd:
-            try:
-                fd.seek(offset)
-                if len(data) < self._chunking_threshold:
-                    written = await self._run_blocking(fd.write, data)
-                else:
-                    for chunk_size in self._chunker(len(data)):
-                        written += await self._run_blocking(
-                            fd.write, data[written : written + chunk_size]
-                        )
-            except BaseException as e:
-                error = e
-
-        return written, error
-
-    async def _truncate(self, handle: FileHandle, size: int) -> None:
-        self._open_guard()
-        async with self._fd_manager.acquire(handle) as fd:
-            await self._run_blocking(fd.truncate, size)
-
     def open(
         self,
         path: str | os.PathLike[str],
@@ -143,6 +103,9 @@ class FilePool:
             path=os.fspath(path),
             mode=mode_spec,
         )
+
+    def manage(self, io: BinaryIO) -> BinaryIOAdapter:
+        return BinaryIOAdapter(self, io)
 
     async def _close_internal(self) -> None:
         close_error: BaseException | None = None

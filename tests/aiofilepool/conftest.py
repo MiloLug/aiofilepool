@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,25 @@ def pool_factory():
         }
         if chunker is not None:
             kwargs["chunker"] = chunker
-        return FilePool(**kwargs)
+        return FilePool(**kwargs)  # type: ignore[arg-type]
 
     return _make_pool
+
+
+class RecordingChunker:
+    def __init__(self, chunks: list[int]):
+        self._chunks = chunks
+        self.calls: list[int] = []
+
+    def __call__(self, data_size: int):
+        self.calls.append(data_size)
+        return iter(self._chunks)
+
+
+@pytest.fixture
+def binary_io_factory():
+    def _make(pool: FilePool, data: bytes = b""):
+        bio = io.BytesIO(data)
+        return pool.manage(bio), bio
+
+    return _make

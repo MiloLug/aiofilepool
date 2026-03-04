@@ -1,11 +1,11 @@
 import pytest
 
 from aiofilepool.errors import (
-    FileHandleInitializedError,
-    FileHandleNotOpenError,
+    IOInitializedError,
+    IONotOpenError,
     FilePoolNotOpenError,
     InvalidFileModeError,
-    InvalidFilePositionError,
+    InvalidPositionError,
 )
 
 
@@ -13,9 +13,9 @@ from aiofilepool.errors import (
     ("error_type", "default_message"),
     [
         (InvalidFileModeError, "invalid file mode"),
-        (FileHandleNotOpenError, "file handle is not open"),
-        (FileHandleInitializedError, "file handle is already initialized"),
-        (InvalidFilePositionError, "invalid file position"),
+        (IONotOpenError, "file handle is not open"),
+        (IOInitializedError, "file handle is already initialized"),
+        (InvalidPositionError, "invalid file position"),
         (FilePoolNotOpenError, "file pool is not open"),
     ],
 )

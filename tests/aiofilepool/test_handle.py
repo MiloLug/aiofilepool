@@ -3,10 +3,11 @@ import os
 import pytest
 
 from aiofilepool.errors import (
-    FileHandleInitializedError,
-    FileHandleNotOpenError,
+    IOInitializedError,
+    IONotOpenError,
+    FilePoolNotOpenError,
     InvalidFileModeError,
-    InvalidFilePositionError,
+    InvalidPositionError,
 )
 
 
@@ -31,7 +32,7 @@ async def test_handle_context_manager_initializes_and_closes(
         async with pool.open(path, "r") as handle:
             assert await handle.read(3) == b"con"
 
-        with pytest.raises(FileHandleNotOpenError):
+        with pytest.raises(IONotOpenError):
             await handle.read(1)
 
 
@@ -41,7 +42,7 @@ async def test_double_initialization_raises(pool_factory, file_writer) -> None:
     async with pool_factory() as pool:
         handle = pool.open(path, "r")
         await handle
-        with pytest.raises(FileHandleInitializedError):
+        with pytest.raises(IOInitializedError):
             await handle
 
 
@@ -75,11 +76,11 @@ async def test_seek_whence_variants_and_invalid_positions(
         assert await handle.seek(1, os.SEEK_CUR) == 3
         assert await handle.seek(-1, os.SEEK_END) == 5
 
-        with pytest.raises(InvalidFilePositionError, match="invalid whence"):
+        with pytest.raises(InvalidPositionError, match="invalid whence"):
             await handle.seek(0, 999)
-        with pytest.raises(InvalidFilePositionError, match="invalid position"):
+        with pytest.raises(InvalidPositionError, match="invalid position"):
             await handle.seek(-1, os.SEEK_SET)
-        with pytest.raises(InvalidFilePositionError, match="invalid position"):
+        with pytest.raises(InvalidPositionError, match="invalid position"):
             await handle.seek(1, os.SEEK_END)
 
 
@@ -126,11 +127,11 @@ async def test_closed_handle_rejects_read_write_and_truncate(
         handle = await pool.open(path, "w+")
         await handle.close()
 
-        with pytest.raises(FileHandleNotOpenError):
+        with pytest.raises(IONotOpenError):
             await handle.read(1, 0)
-        with pytest.raises(FileHandleNotOpenError):
+        with pytest.raises(IONotOpenError):
             await handle.write(b"x")
-        with pytest.raises(FileHandleNotOpenError):
+        with pytest.raises(IONotOpenError):
             await handle.truncate(0)
 
 
@@ -142,13 +143,26 @@ async def test_negative_offsets_and_sizes_raise_invalid_position(
     async with pool_factory() as pool:
         handle = await pool.open(path, "r+")
 
-        with pytest.raises(InvalidFilePositionError, match="offset must be >= 0"):
+        with pytest.raises(InvalidPositionError, match="offset must be >= 0"):
             await handle.read(1, -1)
-        with pytest.raises(InvalidFilePositionError, match="size must be >= 0"):
+        with pytest.raises(InvalidPositionError, match="size must be >= 0"):
             await handle.read(-1, 0)
-        with pytest.raises(InvalidFilePositionError, match="offset must be >= 0"):
+        with pytest.raises(InvalidPositionError, match="offset must be >= 0"):
             await handle.write(b"x", -1)
-        with pytest.raises(
-            InvalidFilePositionError, match="truncate size must be >= 0"
-        ):
+        with pytest.raises(InvalidPositionError, match="truncate size must be >= 0"):
             await handle.truncate(-1)
+
+
+async def test_open_handle_operations_fail_after_pool_close(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("pool-close-open-handle.bin", b"")
+    pool = pool_factory()
+    handle = await pool.open(path, "w+")
+
+    await pool.close()
+
+    with pytest.raises(FilePoolNotOpenError):
+        await handle.write(b"x")
+    with pytest.raises(FilePoolNotOpenError):
+        await handle.read(1, 0)
