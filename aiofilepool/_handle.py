@@ -73,6 +73,10 @@ class FileHandle(AsyncBinaryIO):
             )
             resolved_size = self._size - resolved_offset if size is None else size
 
+            if resolved_size == 0:
+                self._position = resolved_offset
+                return bytes()
+
             async with self._acquire_fd() as fd:
                 fd.seek(resolved_offset)
                 if resolved_size < self._pool._chunking_threshold:
@@ -190,7 +194,17 @@ class FileHandle(AsyncBinaryIO):
             if self._state != AsyncIOState.OPEN:
                 raise IONotOpenError()
 
-            resolved_offset = self._position if offset is None else offset
+            resolved_offset = (
+                self._position
+                if offset is None
+                else offset
+                if offset < self._size
+                else self._size
+            )
+            if resolved_offset >= self._size:
+                self._position = self._size
+                return
+
             resolved_size = self._size - resolved_offset if size is None else size
             resolved_chunker = self._pool._chunker if chunker is None else chunker
             resolved_threshold = (

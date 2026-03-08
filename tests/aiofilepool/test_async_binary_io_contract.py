@@ -57,13 +57,12 @@ async def test_async_io_seek_whence_variants_and_invalid_positions(
         assert await case.io.seek(2) == 2
         assert await case.io.seek(1, 1) == 3
         assert await case.io.seek(-1, 2) == 5
+        assert await case.io.seek(999, 2) == 6
 
         with pytest.raises(InvalidPositionError):
             await case.io.seek(0, 999)
         with pytest.raises(InvalidPositionError):
             await case.io.seek(-1)
-        with pytest.raises(InvalidPositionError):
-            await case.io.seek(1, 2)
 
 
 async def test_async_io_negative_offsets_and_sizes_raise_invalid_position(

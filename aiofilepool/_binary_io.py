@@ -42,17 +42,27 @@ class BinaryIOAdapter(AsyncBinaryIO):
         return self
 
     async def read(self, size: int | None = None, offset: int | None = None) -> bytes:
+        if offset is not None and offset < 0:
+            raise InvalidPositionError("offset must be >= 0")
+
+        if size is not None and size < 0:
+            raise InvalidPositionError("size must be >= 0")
+
         async with self._op_lock:
             if self._state != AsyncIOState.OPEN:
                 raise IONotOpenError()
-
-            if offset is not None and (offset < 0 or offset > self._size):
-                raise InvalidPositionError("offset must be in [0, file size]")
-
-            if size is not None and size < 0:
-                raise InvalidPositionError("size must be >= 0")
-            resolved_offset = self._position if offset is None else offset
+            resolved_offset = (
+                self._position
+                if offset is None
+                else offset
+                if offset < self._size
+                else self._size
+            )
             resolved_size = self._size - resolved_offset if size is None else size
+
+            if resolved_size == 0:
+                self._position = resolved_offset
+                return bytes()
 
             self._io.seek(resolved_offset)
             if resolved_size < self._pool._chunking_threshold:
@@ -68,14 +78,19 @@ class BinaryIOAdapter(AsyncBinaryIO):
             return bytes(data)
 
     async def write(self, data: bytes, offset: int | None = None) -> int:
+        if offset is not None and offset < 0:
+            raise InvalidPositionError("offset must be >= 0")
+
         async with self._op_lock:
             if self._state != AsyncIOState.OPEN:
                 raise IONotOpenError()
-
-            if offset is not None:
-                if offset < 0:
-                    raise InvalidPositionError("offset must be >= 0")
-            resolved_offset = self._position if offset is None else offset
+            resolved_offset = (
+                self._position
+                if offset is None
+                else offset
+                if offset < self._size
+                else self._size
+            )
 
             written = 0
             error: BaseException | None = None
@@ -109,10 +124,12 @@ class BinaryIOAdapter(AsyncBinaryIO):
             case _:
                 raise InvalidPositionError("invalid whence")
 
-        if position < 0 or position > self._size:
+        if position < 0:
             raise InvalidPositionError(
                 f"invalid position = {position} after seeking by {offset}"
             )
+        if position > self._size:
+            position = self._size
         self._position = position
         return position
 
@@ -129,23 +146,34 @@ class BinaryIOAdapter(AsyncBinaryIO):
         chunker: Chunker | None = None,
         chunking_threshold: int | None = None,
     ) -> AsyncGenerator[bytes, None]:
+        if offset is not None and offset < 0:
+            raise InvalidPositionError("offset must be >= 0")
+
+        if size is not None and size < 0:
+            raise InvalidPositionError("size must be >= 0")
+
+        if chunker is None:
+            chunker = self._pool._chunker
+
+        if chunking_threshold is None:
+            chunking_threshold = self._pool._chunking_threshold
+
         async with self._op_lock:
             if self._state != AsyncIOState.OPEN:
                 raise IONotOpenError()
 
-            if offset is not None and (offset < 0 or offset > self._size):
-                raise InvalidPositionError("offset must be in [0, file size]")
+            resolved_offset = (
+                self._position
+                if offset is None
+                else offset
+                if offset < self._size
+                else self._size
+            )
+            if resolved_offset >= self._size:
+                self._position = self._size
+                return
 
-            if size is not None and size < 0:
-                raise InvalidPositionError("size must be >= 0")
-            resolved_offset = self._position if offset is None else offset
             resolved_size = self._size - resolved_offset if size is None else size
-
-            if chunker is None:
-                chunker = self._pool._chunker
-
-            if chunking_threshold is None:
-                chunking_threshold = self._pool._chunking_threshold
 
             self._io.seek(resolved_offset)
             consumed_size = 0
