@@ -54,8 +54,8 @@ class FileHandle(AsyncBinaryIO):
         if not self._mode.read:
             raise InvalidFileModeError("file is not readable")
 
-        if offset is not None and (offset < 0 or offset > self._size):
-            raise InvalidPositionError("offset must be in [0, file size]")
+        if offset is not None and offset < 0:
+            raise InvalidPositionError("offset must be >= 0")
 
         if size is not None and size < 0:
             raise InvalidPositionError("size must be >= 0")
@@ -64,7 +64,13 @@ class FileHandle(AsyncBinaryIO):
             if self._state != AsyncIOState.OPEN:
                 raise IONotOpenError()
 
-            resolved_offset = self._position if offset is None else offset
+            resolved_offset = (
+                self._position
+                if offset is None
+                else offset
+                if offset < self._size
+                else self._size
+            )
             resolved_size = self._size - resolved_offset if size is None else size
 
             async with self._acquire_fd() as fd:
@@ -90,7 +96,13 @@ class FileHandle(AsyncBinaryIO):
             if self._state != AsyncIOState.OPEN:
                 raise IONotOpenError()
 
-            resolved_offset = self._position if offset is None else offset
+            resolved_offset = (
+                self._position
+                if offset is None
+                else offset
+                if offset < self._size
+                else self._size
+            )
             written = 0
             error: BaseException | None = None
 
@@ -125,10 +137,14 @@ class FileHandle(AsyncBinaryIO):
             case _:
                 raise InvalidPositionError("invalid whence")
 
-        if position < 0 or position > self._size:
+        if position < 0:
             raise InvalidPositionError(
                 f"invalid position = {position} after seeking by {offset}"
             )
+
+        if position > self._size:
+            position = self._size
+
         self._position = position
         return position
 
