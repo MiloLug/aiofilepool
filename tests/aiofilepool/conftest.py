@@ -1,12 +1,15 @@
 import asyncio
+from collections.abc import Buffer
 import io
 from collections import defaultdict
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator, BinaryIO, Literal
 
 import pytest
 
-from aiofilepool import FilePool
+from aiofilepool import AsyncBinaryIO, FilePool
 
 
 @pytest.fixture
@@ -80,11 +83,11 @@ class FailingIO(io.BytesIO):
         if self._fail_on.get(operation) == self.calls[operation]:
             raise RuntimeError(f"{operation} failed")
 
-    def read(self, size: int = -1) -> bytes:
+    def read(self, size: int | None = -1) -> bytes:
         self._maybe_fail("read")
         return super().read(size)
 
-    def write(self, data: bytes) -> int:
+    def write(self, data: bytes | Buffer) -> int:
         self._maybe_fail("write")
         return super().write(data)
 
@@ -106,6 +109,57 @@ def binary_io_factory():
     def _make(pool: FilePool, data: bytes = b"", io_obj: io.BytesIO | None = None):
         bio = io_obj or io.BytesIO(data)
         return pool.manage(bio), bio
+
+    return _make
+
+
+@dataclass
+class AsyncIOCase:
+    kind: Literal["handle", "adapter"]
+    pool: FilePool
+    io: AsyncBinaryIO
+    backing: Path | BinaryIO
+
+
+@pytest.fixture(params=["handle", "adapter"], ids=["handle", "adapter"])
+def async_io_case_factory(request, pool_factory, file_writer, monkeypatch):
+    kind = request.param
+
+    @asynccontextmanager
+    async def _make(
+        *,
+        data: bytes = b"",
+        handle_mode: str = "r+",
+        initialize: bool = True,
+        thread_pool_size: int = 2,
+        chunking_threshold: int = 1024,
+        chunker=None,
+        io_obj: BinaryIO | None = None,
+        filename: str = "contract.bin",
+    ) -> AsyncIterator[AsyncIOCase]:
+        async with pool_factory(
+            thread_pool_size=thread_pool_size,
+            chunking_threshold=chunking_threshold,
+            chunker=chunker,
+        ) as pool:
+            if kind == "handle":
+                path = file_writer(filename, data)
+                if io_obj is not None:
+                    monkeypatch.setattr(
+                        "aiofilepool._fd_manager.open",
+                        lambda path, mode: io_obj,
+                        raising=False,
+                    )
+                subject = pool.open(path, handle_mode)
+                backing: Path | BinaryIO = path
+            else:
+                backing = io_obj or io.BytesIO(data)
+                subject = pool.manage(backing)
+
+            if initialize:
+                subject = await subject
+
+            yield AsyncIOCase(kind=kind, pool=pool, io=subject, backing=backing)
 
     return _make
 

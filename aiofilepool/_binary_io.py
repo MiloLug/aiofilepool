@@ -46,29 +46,25 @@ class BinaryIOAdapter(AsyncBinaryIO):
             if self._state != AsyncIOState.OPEN:
                 raise IONotOpenError()
 
-            if offset is not None:
-                if offset < 0:
-                    raise InvalidPositionError("offset must be >= 0")
-            else:
-                offset = self._position
+            if offset is not None and (offset < 0 or offset > self._size):
+                raise InvalidPositionError("offset must be in [0, file size]")
 
-            if size is not None:
-                if size < 0:
-                    raise InvalidPositionError("size must be >= 0")
-            else:
-                size = self._size - offset
+            if size is not None and size < 0:
+                raise InvalidPositionError("size must be >= 0")
+            resolved_offset = self._position if offset is None else offset
+            resolved_size = self._size - resolved_offset if size is None else size
 
-            self._io.seek(offset)
-            if size < self._pool._chunking_threshold:
-                data = await self._pool._run_blocking(self._io.read, size)
+            self._io.seek(resolved_offset)
+            if resolved_size < self._pool._chunking_threshold:
+                data = await self._pool._run_blocking(self._io.read, resolved_size)
             else:
                 data = bytearray()
-                for chunk_size in self._pool._chunker(size):
+                for chunk_size in self._pool._chunker(resolved_size):
                     data.extend(
                         await self._pool._run_blocking(self._io.read, chunk_size)
                     )
 
-            self._position = offset + size
+            self._position = resolved_offset + resolved_size
             return bytes(data)
 
     async def write(self, data: bytes, offset: int | None = None) -> int:
@@ -79,13 +75,12 @@ class BinaryIOAdapter(AsyncBinaryIO):
             if offset is not None:
                 if offset < 0:
                     raise InvalidPositionError("offset must be >= 0")
-            else:
-                offset = self._position
+            resolved_offset = self._position if offset is None else offset
 
             written = 0
             error: BaseException | None = None
             try:
-                self._io.seek(offset)
+                self._io.seek(resolved_offset)
                 if len(data) < self._pool._chunking_threshold:
                     written = await self._pool._run_blocking(self._io.write, data)
                 else:
@@ -96,8 +91,8 @@ class BinaryIOAdapter(AsyncBinaryIO):
             except BaseException as e:
                 error = e
 
-            self._size = max(self._size, offset + written)
-            self._position = offset + written
+            self._size = max(self._size, resolved_offset + written)
+            self._position = resolved_offset + written
             if error:
                 raise error
             return written
@@ -138,17 +133,13 @@ class BinaryIOAdapter(AsyncBinaryIO):
             if self._state != AsyncIOState.OPEN:
                 raise IONotOpenError()
 
-            if offset is not None:
-                if offset < 0:
-                    raise InvalidPositionError("offset must be >= 0")
-            else:
-                offset = self._position
+            if offset is not None and (offset < 0 or offset > self._size):
+                raise InvalidPositionError("offset must be in [0, file size]")
 
-            if size is not None:
-                if size < 0:
-                    raise InvalidPositionError("size must be >= 0")
-            else:
-                size = self._size - offset
+            if size is not None and size < 0:
+                raise InvalidPositionError("size must be >= 0")
+            resolved_offset = self._position if offset is None else offset
+            resolved_size = self._size - resolved_offset if size is None else size
 
             if chunker is None:
                 chunker = self._pool._chunker
@@ -156,20 +147,20 @@ class BinaryIOAdapter(AsyncBinaryIO):
             if chunking_threshold is None:
                 chunking_threshold = self._pool._chunking_threshold
 
-            self._io.seek(offset)
+            self._io.seek(resolved_offset)
             consumed_size = 0
             try:
-                if size < chunking_threshold:
-                    data = await self._pool._run_blocking(self._io.read, size)
+                if resolved_size < chunking_threshold:
+                    data = await self._pool._run_blocking(self._io.read, resolved_size)
                     consumed_size += len(data)
                     yield data
                 else:
-                    for chunk_size in chunker(size):
+                    for chunk_size in chunker(resolved_size):
                         data = await self._pool._run_blocking(self._io.read, chunk_size)
                         consumed_size += len(data)
                         yield data
             finally:
-                self._position = offset + consumed_size
+                self._position = resolved_offset + consumed_size
 
     async def close(self) -> None:
         if self._state != AsyncIOState.OPEN:

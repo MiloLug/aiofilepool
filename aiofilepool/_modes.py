@@ -1,3 +1,4 @@
+from collections import Counter
 from typing import Self
 
 from aiofilepool.errors import InvalidFileModeError
@@ -17,6 +18,19 @@ class ModeSpec:
 
     @classmethod
     def from_str(cls, mode: str) -> Self:
+        counts = Counter(mode)
+        duplicates = sorted(flag for flag, count in counts.items() if count > 1)
+        if duplicates:
+            raise InvalidFileModeError(
+                f"duplicate mode flags are not allowed: {', '.join(duplicates)}"
+            )
+
+        unknown = sorted(set(mode) - {"r", "w", "+", "b"})
+        if unknown:
+            raise InvalidFileModeError(
+                f"unknown mode flags are not allowed: {', '.join(unknown)}"
+            )
+
         has_r = "r" in mode
         has_w = "w" in mode
         has_plus = "+" in mode
@@ -31,6 +45,6 @@ class ModeSpec:
             read=has_r or has_plus,
             write=writable,
             truncate=has_w,
-            mode="".join(set(mode) & set("rwx+")) + "b",
+            mode=f"{'r' if has_r else 'w'}{'+' if has_plus else ''}b",
             renewal_mode=f"r{'+' if writable else ''}b",
         )

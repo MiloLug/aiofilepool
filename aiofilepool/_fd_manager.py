@@ -42,10 +42,24 @@ class FileDescriptorManager:
         )
 
         handle = self._cold_handles.pop()
-        fd = self._descriptors.pop(handle)
-        fd.flush()
-        fd.close()
+        fd = self._descriptors[handle]
+        close_error: BaseException | None = None
+        try:
+            fd.flush()
+        except BaseException as exc:
+            close_error = exc
+
+        try:
+            fd.close()
+        except BaseException as exc:
+            if close_error is None:
+                close_error = exc
+
+        self._descriptors.pop(handle, None)
         self._inactive_handles.add(handle)
+        if close_error is not None:
+            await self._release_slot()
+            raise close_error
 
     async def _activate_handle(self, handle: FileHandle) -> IO:
         await self._ensure_slot()

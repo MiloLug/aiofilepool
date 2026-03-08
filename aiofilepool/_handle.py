@@ -53,65 +53,65 @@ class FileHandle(AsyncBinaryIO):
     async def read(self, size: int | None = None, offset: int | None = None) -> bytes:
         if not self._mode.read:
             raise InvalidFileModeError("file is not readable")
-        if self._state != AsyncIOState.OPEN:
-            raise IONotOpenError()
 
-        if offset is not None:
-            if offset < 0:
-                raise InvalidPositionError("offset must be >= 0")
-        else:
-            offset = self._position
+        if offset is not None and (offset < 0 or offset > self._size):
+            raise InvalidPositionError("offset must be in [0, file size]")
 
-        if size is not None:
-            if size < 0:
-                raise InvalidPositionError("size must be >= 0")
-        else:
-            size = self._size - offset
+        if size is not None and size < 0:
+            raise InvalidPositionError("size must be >= 0")
 
-        async with self._op_lock, self._acquire_fd() as fd:
-            fd.seek(offset)
-            if size < self._pool._chunking_threshold:
-                data = await self._pool._run_blocking(fd.read, size)
-            else:
-                data = bytearray()
-                for chunk_size in self._pool._chunker(size):
-                    data.extend(await self._pool._run_blocking(fd.read, chunk_size))
-            self._position = offset + size
-            return bytes(data)
+        async with self._op_lock:
+            if self._state != AsyncIOState.OPEN:
+                raise IONotOpenError()
+
+            resolved_offset = self._position if offset is None else offset
+            resolved_size = self._size - resolved_offset if size is None else size
+
+            async with self._acquire_fd() as fd:
+                fd.seek(resolved_offset)
+                if resolved_size < self._pool._chunking_threshold:
+                    data = await self._pool._run_blocking(fd.read, resolved_size)
+                else:
+                    data = bytearray()
+                    for chunk_size in self._pool._chunker(resolved_size):
+                        data.extend(await self._pool._run_blocking(fd.read, chunk_size))
+                self._position = resolved_offset + resolved_size
+                return bytes(data)
 
     async def write(self, data: bytes, offset: int | None = None) -> int:
         if not self._mode.write:
             raise InvalidFileModeError("file is not writable")
-        if self._state != AsyncIOState.OPEN:
-            raise IONotOpenError()
 
         if offset is not None:
             if offset < 0:
                 raise InvalidPositionError("offset must be >= 0")
-        else:
-            offset = self._position
 
-        written = 0
-        error: BaseException | None = None
+        async with self._op_lock:
+            if self._state != AsyncIOState.OPEN:
+                raise IONotOpenError()
 
-        async with self._op_lock, self._acquire_fd() as fd:
-            try:
-                fd.seek(offset)
-                if len(data) < self._pool._chunking_threshold:
-                    written = await self._pool._run_blocking(fd.write, data)
-                else:
-                    for chunk_size in self._pool._chunker(len(data)):
-                        written += await self._pool._run_blocking(
-                            fd.write, data[written : written + chunk_size]
-                        )
-            except BaseException as e:
-                error = e
+            resolved_offset = self._position if offset is None else offset
+            written = 0
+            error: BaseException | None = None
 
-            self._size = max(self._size, offset + written)
-            self._position = offset + written
-            if error:
-                raise error
-            return written
+            async with self._acquire_fd() as fd:
+                try:
+                    fd.seek(resolved_offset)
+                    if len(data) < self._pool._chunking_threshold:
+                        written = await self._pool._run_blocking(fd.write, data)
+                    else:
+                        for chunk_size in self._pool._chunker(len(data)):
+                            written += await self._pool._run_blocking(
+                                fd.write, data[written : written + chunk_size]
+                            )
+                except BaseException as e:
+                    error = e
+
+                self._size = max(self._size, resolved_offset + written)
+                self._position = resolved_offset + written
+                if error:
+                    raise error
+                return written
 
     async def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
         position = self._position
@@ -141,16 +141,18 @@ class FileHandle(AsyncBinaryIO):
     async def truncate(self, size: int | None = None) -> None:
         if not self._mode.write:
             raise InvalidFileModeError("file is not writable")
-        if self._state != AsyncIOState.OPEN:
-            raise IONotOpenError()
-
-        size = size if size is not None else self._position
-        if size < 0:
+        if size is not None and size < 0:
             raise InvalidPositionError("truncate size must be >= 0")
 
-        async with self._op_lock, self._acquire_fd() as fd:
-            await self._pool._run_blocking(fd.truncate, size)
-            self._size = self._position = size
+        async with self._op_lock:
+            if self._state != AsyncIOState.OPEN:
+                raise IONotOpenError()
+
+            resolved_size = self._position if size is None else size
+
+            async with self._acquire_fd() as fd:
+                await self._pool._run_blocking(fd.truncate, resolved_size)
+                self._size = self._position = resolved_size
 
     async def chunks(
         self,
@@ -161,42 +163,41 @@ class FileHandle(AsyncBinaryIO):
     ) -> AsyncGenerator[bytes, None]:
         if not self._mode.read:
             raise InvalidFileModeError("file is not readable")
-        if self._state != AsyncIOState.OPEN:
-            raise IONotOpenError()
 
-        if offset is not None:
-            if offset < 0:
-                raise InvalidPositionError("offset must be >= 0")
-        else:
-            offset = self._position
+        if offset is not None and (offset < 0 or offset > self._size):
+            raise InvalidPositionError("offset must be in [0, file size]")
 
-        if size is not None:
-            if size < 0:
-                raise InvalidPositionError("size must be >= 0")
-        else:
-            size = self._size - offset
+        if size is not None and size < 0:
+            raise InvalidPositionError("size must be >= 0")
 
-        if chunker is None:
-            chunker = self._pool._chunker
+        async with self._op_lock:
+            if self._state != AsyncIOState.OPEN:
+                raise IONotOpenError()
 
-        if chunking_threshold is None:
-            chunking_threshold = self._pool._chunking_threshold
+            resolved_offset = self._position if offset is None else offset
+            resolved_size = self._size - resolved_offset if size is None else size
+            resolved_chunker = self._pool._chunker if chunker is None else chunker
+            resolved_threshold = (
+                self._pool._chunking_threshold
+                if chunking_threshold is None
+                else chunking_threshold
+            )
 
-        async with self._op_lock, self._acquire_fd() as fd:
-            fd.seek(offset)
-            consumed_size = 0
-            try:
-                if size < chunking_threshold:
-                    data = await self._pool._run_blocking(fd.read, size)
-                    consumed_size += len(data)
-                    yield data
-                else:
-                    for chunk_size in chunker(size):
-                        data = await self._pool._run_blocking(fd.read, chunk_size)
+            async with self._acquire_fd() as fd:
+                fd.seek(resolved_offset)
+                consumed_size = 0
+                try:
+                    if resolved_size < resolved_threshold:
+                        data = await self._pool._run_blocking(fd.read, resolved_size)
                         consumed_size += len(data)
                         yield data
-            finally:
-                self._position = offset + consumed_size
+                    else:
+                        for chunk_size in resolved_chunker(resolved_size):
+                            data = await self._pool._run_blocking(fd.read, chunk_size)
+                            consumed_size += len(data)
+                            yield data
+                finally:
+                    self._position = resolved_offset + consumed_size
 
     async def close(self) -> None:
         async with self._op_lock:

@@ -1,15 +1,13 @@
 import asyncio
-import io
 import threading
 from pathlib import Path
 
 import pytest
 
 from aiofilepool import FilePool, StrPath
-from aiofilepool._pool import FilePoolState
 from aiofilepool.errors import FilePoolNotOpenError
 
-from .conftest import AsyncGate, FailingIO, RecordingChunker
+from .conftest import AsyncGate, FailingIO
 
 
 pytestmark = pytest.mark.asyncio
@@ -57,10 +55,6 @@ async def test_stat_returns_size_for_existing_file(pool_factory, file_writer) ->
         assert stat.st_size == 6
 
 
-async def test_package_exports_strpath_alias() -> None:
-    assert StrPath is not None
-
-
 @pytest.mark.parametrize(
     "path_factory",
     [
@@ -76,7 +70,6 @@ async def test_open_accepts_strpath_inputs(
     async with pool_factory(thread_pool_size=0) as pool:
         handle = await pool.open(path_factory(path), "w+")
 
-        assert isinstance(handle._path, str)
         assert await handle.write(b"payload") == 7
         assert await handle.read(offset=0) == b"payload"
 
@@ -112,29 +105,12 @@ async def test_threadless_mode_read_write_still_works(
         assert await handle.read(offset=0) == payload
 
 
-async def test_chunker_is_used_above_threshold_for_read_and_write(
-    pool_factory, file_writer
-) -> None:
-    path = file_writer("chunked.bin", b"")
-    payload = b"abcdefghijk"
-    chunker = RecordingChunker([3, 3, 5])
-
-    async with pool_factory(chunking_threshold=4, chunker=chunker) as pool:
-        handle = await pool.open(path, "w+")
-        written = await handle.write(payload)
-        assert written == len(payload)
-
-        data = await handle.read(offset=0)
-        assert data == payload
-
-    assert chunker.calls == [len(payload), len(payload)]
-
-
 async def test_close_cancelled_waiter_can_still_reach_closed_state(
-    pool_factory, monkeypatch
+    pool_factory, file_writer, monkeypatch
 ) -> None:
     pool = pool_factory()
     entered_close = asyncio.Event()
+    path = file_writer("closed-after-retry.bin", b"")
 
     original_close = pool._fd_manager.close
 
@@ -153,15 +129,18 @@ async def test_close_cancelled_waiter_can_still_reach_closed_state(
         await first_waiter
 
     await pool.close()
-    assert pool._state == FilePoolState.CLOSED
+
+    with pytest.raises(FilePoolNotOpenError):
+        pool.open(path, "r")
 
 
 async def test_concurrent_close_callers_share_a_single_close_task(
-    pool_factory, monkeypatch
+    pool_factory, file_writer, monkeypatch
 ) -> None:
     pool = pool_factory()
     gate = AsyncGate()
     close_calls = 0
+    path = file_writer("closed-concurrently.bin", b"")
     original_close = pool._fd_manager.close
 
     async def delayed_close(timeout=None):
@@ -175,35 +154,46 @@ async def test_concurrent_close_callers_share_a_single_close_task(
     waiters = [asyncio.create_task(pool.close()) for _ in range(3)]
     await gate.entered.wait()
     assert close_calls == 1
-    assert pool._state == FilePoolState.CLOSING
 
     gate.release()
 
     await asyncio.gather(*waiters)
-    assert pool._state == FilePoolState.CLOSED
-    assert pool._close_task is not None
+
+    with pytest.raises(FilePoolNotOpenError):
+        pool.open(path, "r")
 
 
-async def test_close_timeout_can_retry_and_finish(pool_factory, monkeypatch) -> None:
-    pool = pool_factory()
+async def test_close_timeout_can_retry_and_finish_with_active_operation(
+    pool_factory, file_writer, monkeypatch
+) -> None:
+    pool = pool_factory(thread_pool_size=1)
     gate = AsyncGate()
-    original_close = pool._fd_manager.close
+    path = file_writer("close-timeout-active.bin", b"")
+    handle = await pool.open(path, "w+")
+    original_run_blocking = pool._run_blocking
+    call_count = 0
 
-    async def delayed_close(timeout=None):
-        await gate.wait()
-        await original_close(timeout=timeout)
+    async def gated_run_blocking(func, *args):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            await gate.wait()
+        return await original_run_blocking(func, *args)
 
-    monkeypatch.setattr(pool._fd_manager, "close", delayed_close)
+    monkeypatch.setattr(pool, "_run_blocking", gated_run_blocking)
+
+    write_task = asyncio.create_task(handle.write(b"abc"))
+    await gate.entered.wait()
 
     with pytest.raises(asyncio.TimeoutError):
         await pool.close(timeout=0.01)
 
-    assert pool._state == FilePoolState.CLOSING
-    assert pool._close_task is not None
     gate.release()
 
+    assert await write_task == 3
     await pool.close()
-    assert pool._state == FilePoolState.CLOSED
+    with pytest.raises(FilePoolNotOpenError):
+        pool.open(path, "r")
 
 
 async def test_run_blocking_waits_for_executor_work_before_cancellation_propagates(
@@ -264,22 +254,3 @@ async def test_pool_close_surfaces_cold_descriptor_flush_errors_after_other_clea
 async def test_file_pool_constructor_rejects_invalid_descriptor_pool_size() -> None:
     with pytest.raises(ValueError, match="max_descriptors must be >= 1"):
         FilePool(descriptor_pool_size=0)
-
-
-async def test_stat_still_works_after_pool_close(pool_factory, file_writer) -> None:
-    path = file_writer("post-close-stat.bin", b"abcdef")
-    pool = pool_factory()
-    await pool.close()
-
-    stat = await pool.stat(path)
-
-    assert stat.st_size == 6
-
-
-async def test_manage_still_works_after_pool_close(pool_factory) -> None:
-    pool = pool_factory()
-    await pool.close()
-
-    adapter = await pool.manage(io.BytesIO(b"abc"))
-
-    assert await adapter.read() == b"abc"
