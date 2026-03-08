@@ -3,7 +3,6 @@ from enum import IntEnum
 import functools
 from concurrent.futures.thread import ThreadPoolExecutor
 import os
-from pathlib import Path
 from typing import Any, BinaryIO, Callable, Self
 
 from aiofilepool._binary_io import BinaryIOAdapter
@@ -70,7 +69,7 @@ class FilePool:
         else:
             self._state = FilePoolState.CLOSED
 
-    async def stat(self, path: Path | str) -> os.stat_result:
+    async def stat(self, path: os.PathLike) -> os.stat_result:
         stat = await self._run_blocking(os.stat, os.fspath(path))
         return stat
 
