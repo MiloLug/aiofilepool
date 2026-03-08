@@ -1,7 +1,9 @@
 import os
+from pathlib import Path
 
 import pytest
 
+from aiofilepool import FileHandle, ModeSpec, StrPath
 from aiofilepool.errors import (
     IOInitializedError,
     IONotOpenError,
@@ -9,10 +11,18 @@ from aiofilepool.errors import (
     InvalidFileModeError,
     InvalidPositionError,
 )
-from .conftest import RecordingChunker
+from .conftest import FailingIO, RecordingChunker
 
 
 pytestmark = pytest.mark.asyncio
+
+
+def _as_path(path: Path) -> StrPath:
+    return path
+
+
+def _as_str(path: Path) -> StrPath:
+    return str(path)
 
 
 async def test_handle_can_be_initialized_via_await(pool_factory, file_writer) -> None:
@@ -45,6 +55,46 @@ async def test_double_initialization_raises(pool_factory, file_writer) -> None:
         await handle
         with pytest.raises(IOInitializedError):
             await handle
+
+
+@pytest.mark.parametrize(
+    "path_factory",
+    [
+        pytest.param(_as_path, id="path"),
+        pytest.param(_as_str, id="str"),
+    ],
+)
+async def test_direct_filehandle_constructor_accepts_strpath_for_read_mode(
+    pool_factory, file_writer, path_factory
+) -> None:
+    path = file_writer("direct-read-handle.bin", b"hello")
+
+    async with pool_factory() as pool:
+        handle = FileHandle(pool, path_factory(path), ModeSpec.from_str("r"))
+
+        assert isinstance(handle._path, str)
+        await handle
+        assert await handle.read() == b"hello"
+
+
+@pytest.mark.parametrize(
+    "path_factory",
+    [
+        pytest.param(_as_path, id="path"),
+        pytest.param(_as_str, id="str"),
+    ],
+)
+async def test_direct_filehandle_constructor_normalizes_truncate_modes(
+    pool_factory, file_writer, path_factory
+) -> None:
+    path = file_writer("direct-write-handle.bin", b"")
+
+    async with pool_factory(thread_pool_size=0) as pool:
+        handle = await FileHandle(pool, path_factory(path), ModeSpec.from_str("w+"))
+
+        assert isinstance(handle._path, str)
+        assert await handle.write(b"abc") == 3
+        assert await handle.read(offset=0) == b"abc"
 
 
 async def test_handle_read_write_cursor_and_offsets(pool_factory, file_writer) -> None:
@@ -251,3 +301,170 @@ async def test_handle_chunks_write_only_handle_raises_invalid_mode(
         handle = await pool.open(path, "w")
         with pytest.raises(InvalidFileModeError, match="file is not readable"):
             [chunk async for chunk in handle.chunks()]
+
+
+async def test_uninitialized_handle_rejects_io_until_initialized(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("uninitialized-handle.bin", b"abc")
+
+    async with pool_factory() as pool:
+        handle = pool.open(path, "r+")
+
+        with pytest.raises(IONotOpenError):
+            await handle.read(1)
+        with pytest.raises(IONotOpenError):
+            await handle.write(b"x")
+        with pytest.raises(IONotOpenError):
+            await handle.truncate(0)
+        with pytest.raises(IONotOpenError):
+            [chunk async for chunk in handle.chunks()]
+
+        await handle.close()
+        assert await handle.tell() == 0
+        assert await handle.size() == 0
+
+        await handle
+        assert await handle.read() == b"abc"
+
+
+async def test_missing_path_read_handle_raises_during_initialization(
+    pool_factory, tmp_path
+) -> None:
+    missing_path = tmp_path / "missing-read-handle.bin"
+
+    async with pool_factory() as pool:
+        handle = pool.open(missing_path, "r")
+        with pytest.raises(FileNotFoundError):
+            await handle
+
+
+async def test_handle_read_past_eof_advances_by_requested_window(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("read-past-eof.bin", b"abc")
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "r")
+
+        assert await handle.read(size=5, offset=2) == b"c"
+        assert await handle.tell() == 7
+
+
+async def test_handle_chunks_past_eof_advances_by_consumed_bytes_only(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("chunks-past-eof.bin", b"abc")
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "r")
+        chunks = [chunk async for chunk in handle.chunks(size=5, offset=2)]
+
+        assert chunks == [b"c"]
+        assert await handle.tell() == 3
+
+
+async def test_handle_chunks_zero_size_beyond_eof_yields_empty_chunk_without_consuming(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("chunks-zero-beyond-eof.bin", b"abc")
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "r")
+        chunks = [chunk async for chunk in handle.chunks(size=0, offset=5)]
+
+        assert chunks == [b""]
+        assert await handle.tell() == 5
+
+
+async def test_handle_chunks_early_close_updates_position_to_consumed_bytes(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("chunks-early-close.bin", b"abcdef")
+    chunker = RecordingChunker([2, 2, 2])
+
+    async with pool_factory(chunking_threshold=4, chunker=chunker) as pool:
+        handle = await pool.open(path, "r")
+        chunks = handle.chunks(size=6, offset=0, chunking_threshold=4)
+
+        assert await anext(chunks) == b"ab"
+        await chunks.aclose()
+
+        assert await handle.tell() == 2
+        assert chunker.calls == [6]
+
+
+async def test_handle_chunks_accepts_chunk_sizes_larger_than_remaining_data(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("chunks-oversized-window.bin", b"abcdef")
+    chunker = RecordingChunker([4, 4])
+
+    async with pool_factory(chunking_threshold=4, chunker=chunker) as pool:
+        handle = await pool.open(path, "r")
+        chunks = [
+            chunk
+            async for chunk in handle.chunks(size=6, offset=0, chunking_threshold=4)
+        ]
+
+        assert chunks == [b"abcd", b"ef"]
+        assert await handle.tell() == 6
+        assert chunker.calls == [6]
+
+
+async def test_handle_truncate_can_grow_file_with_zero_padding(
+    pool_factory, file_writer
+) -> None:
+    path = file_writer("truncate-grow.bin", b"ab")
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "r+")
+        await handle.truncate(5)
+
+        assert await handle.tell() == 5
+        assert await handle.size() == 5
+        assert await handle.read(offset=0) == b"ab\x00\x00\x00"
+
+
+async def test_handle_read_failure_leaves_position_unchanged(
+    pool_factory, file_writer, monkeypatch
+) -> None:
+    path = file_writer("failing-read.bin", b"abc")
+    failing_io = FailingIO(b"abc", fail_on={"read": 1})
+
+    monkeypatch.setattr(
+        "aiofilepool._fd_manager.open", lambda path, mode: failing_io, raising=False
+    )
+
+    async with pool_factory(thread_pool_size=0) as pool:
+        handle = await pool.open(path, "r")
+
+        with pytest.raises(RuntimeError, match="read failed"):
+            await handle.read(1, 0)
+
+        assert await handle.tell() == 0
+        assert await handle.size() == 3
+
+
+async def test_handle_chunked_write_failure_preserves_committed_prefix(
+    pool_factory, file_writer, monkeypatch
+) -> None:
+    path = file_writer("failing-write.bin", b"")
+    chunker = RecordingChunker([2, 2, 2])
+    failing_io = FailingIO(fail_on={"write": 2})
+
+    monkeypatch.setattr(
+        "aiofilepool._fd_manager.open", lambda path, mode: failing_io, raising=False
+    )
+
+    async with pool_factory(
+        thread_pool_size=0, chunking_threshold=4, chunker=chunker
+    ) as pool:
+        handle = await pool.open(path, "w+")
+
+        with pytest.raises(RuntimeError, match="write failed"):
+            await handle.write(b"abcdef")
+
+        assert await handle.tell() == 2
+        assert await handle.size() == 2
+        assert failing_io.getvalue() == b"ab"

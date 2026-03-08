@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, AsyncGenerator
 from aiofilepool._base_io import AsyncBinaryIO, AsyncIOState
 from aiofilepool._chunking import Chunker
 from aiofilepool._modes import ModeSpec
+from aiofilepool._types import StrPath
 from aiofilepool.errors import (
     IONotOpenError,
     IOInitializedError,
@@ -17,9 +18,9 @@ if TYPE_CHECKING:
 
 
 class FileHandle(AsyncBinaryIO):
-    def __init__(self, pool: "FilePool", path: str, mode: ModeSpec):
+    def __init__(self, pool: "FilePool", path: StrPath, mode: ModeSpec):
         self._pool = pool
-        self._path = path
+        self._path: str = os.fspath(path)
         self._mode = mode
         self._position = 0
         self._size = 0

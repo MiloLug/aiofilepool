@@ -9,6 +9,7 @@ from aiofilepool._binary_io import BinaryIOAdapter
 from aiofilepool._chunking import BalancedChunker, Chunker
 from aiofilepool._fd_manager import FileDescriptorManager
 from aiofilepool._handle import FileHandle
+from aiofilepool._types import StrPath
 from aiofilepool.errors import FilePoolNotOpenError
 
 from ._modes import ModeSpec
@@ -69,7 +70,7 @@ class FilePool:
         else:
             self._state = FilePoolState.CLOSED
 
-    async def stat(self, path: os.PathLike) -> os.stat_result:
+    async def stat(self, path: StrPath) -> os.stat_result:
         stat = await self._run_blocking(os.stat, os.fspath(path))
         return stat
 
@@ -92,14 +93,14 @@ class FilePool:
 
     def open(
         self,
-        path: str | os.PathLike[str],
+        path: StrPath,
         mode: str = "r",
     ) -> FileHandle:
         self._open_guard()
         mode_spec = ModeSpec.from_str(mode)
         return FileHandle(
             pool=self,
-            path=os.fspath(path),
+            path=path,
             mode=mode_spec,
         )
 

@@ -76,3 +76,28 @@ def test_balanced_chunker_scaling_path_is_deterministic(
     )
 
     assert list(chunker(70)) == [20, 10, 20, 20]
+
+
+def test_balanced_chunker_never_emits_a_chunk_larger_than_max() -> None:
+    chunker = BalancedChunker(
+        scale_up=2.0,
+        scale_down=0.5,
+        min_chunk_size=8,
+        max_chunk_size=32,
+    )
+
+    chunks = list(chunker(512))
+
+    assert max(chunks) <= 32
+    assert sum(chunks) == 512
+
+
+def test_balanced_chunker_exact_threshold_boundary_stays_stable() -> None:
+    chunker = BalancedChunker(
+        scale_up=2.0,
+        scale_down=0.5,
+        min_chunk_size=8,
+        max_chunk_size=32,
+    )
+
+    assert list(chunker(16)) == [16]

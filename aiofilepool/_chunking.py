@@ -63,15 +63,25 @@ class BalancedChunker(Chunker):
             chunk_rate = (current_time - prev_time) / chunk_size
 
             if chunk_size < self._max_chunk_size and chunk_rate >= prev_chunk_rate:
-                chunk_size = int(chunk_size * self._scale_up)
+                chunk_size = min(
+                    self._max_chunk_size,
+                    int(chunk_size * self._scale_up),
+                )
             elif chunk_size > self._min_chunk_size:
-                chunk_size = int(chunk_size * self._scale_down)
+                chunk_size = max(
+                    self._min_chunk_size,
+                    int(chunk_size * self._scale_down),
+                )
 
             prev_time = current_time
             prev_chunk_rate = chunk_rate
 
             yield chunk_size
             data_size -= chunk_size
+
+        while data_size > self._max_chunk_size:
+            yield self._max_chunk_size
+            data_size -= self._max_chunk_size
 
         if data_size > 0:
             yield data_size
