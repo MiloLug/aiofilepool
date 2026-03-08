@@ -94,7 +94,7 @@ class FilePool:
     def open(
         self,
         path: str | os.PathLike[str],
-        mode: str,
+        mode: str = "r",
     ) -> FileHandle:
         self._open_guard()
         mode_spec = ModeSpec.from_str(mode)
