@@ -3,7 +3,8 @@ from enum import IntEnum
 import functools
 from concurrent.futures.thread import ThreadPoolExecutor
 import os
-from typing import Any, BinaryIO, Callable, Self
+from collections.abc import Callable
+from typing import Any, BinaryIO, Self
 
 from aiofilepool._binary_io import BinaryIOAdapter
 from aiofilepool._chunking import BalancedChunker, Chunker
