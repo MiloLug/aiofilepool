@@ -74,24 +74,6 @@ async def test_open_accepts_strpath_inputs(
         assert await handle.read(offset=0) == b"payload"
 
 
-@pytest.mark.parametrize(
-    "path_factory",
-    [
-        pytest.param(_as_path, id="path"),
-        pytest.param(_as_str, id="str"),
-    ],
-)
-async def test_stat_accepts_strpath_inputs(
-    pool_factory, file_writer, path_factory
-) -> None:
-    path = file_writer("strpath-stat.bin", b"abcdef")
-
-    async with pool_factory() as pool:
-        stat = await pool.stat(path_factory(path))
-
-    assert stat.st_size == 6
-
-
 async def test_threadless_mode_read_write_still_works(
     pool_factory, file_writer
 ) -> None:

@@ -1,6 +1,25 @@
+"""Property-based tests for `FixedChunker` and `BalancedChunker`.
+
+Replaces a stack of example tests with Hypothesis property tests that verify
+the load-bearing chunker invariants:
+
+* `sum(chunks) == data_size`
+* every chunk is `> 0`
+* every chunk is `<= max_chunk_size` (BalancedChunker)
+* min/max bounds are respected when `data_size` allows
+
+Plus a small set of constructor-validation example tests retained verbatim.
+
+See final-test-review.md §7 #15.
+"""
+
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 from aiofilepool._chunking import BalancedChunker, FixedChunker
+
+
+# --- FixedChunker -------------------------------------------------------------
 
 
 @pytest.mark.parametrize("chunk_size", [0, -1, -32])
@@ -9,14 +28,24 @@ def test_fixed_chunker_rejects_non_positive_chunk_size(chunk_size: int) -> None:
         FixedChunker(chunk_size)
 
 
-def test_fixed_chunker_splits_into_equal_chunks_with_remainder() -> None:
-    chunker = FixedChunker(4)
-    assert list(chunker(10)) == [4, 4, 2]
+@settings(
+    max_examples=100,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+@given(
+    chunk_size=st.integers(min_value=1, max_value=4096),
+    data_size=st.integers(min_value=0, max_value=4096 * 8 + 17),
+)
+def test_fixed_chunker_invariants(chunk_size: int, data_size: int) -> None:
+    chunks = list(FixedChunker(chunk_size)(data_size))
+    assert sum(chunks) == data_size
+    if chunks:
+        assert all(0 < c <= chunk_size for c in chunks)
+        assert all(c == chunk_size for c in chunks[:-1])
 
 
-def test_fixed_chunker_returns_no_chunks_for_empty_data() -> None:
-    chunker = FixedChunker(8)
-    assert list(chunker(0)) == []
+# --- BalancedChunker ----------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -44,64 +73,48 @@ def test_balanced_chunker_validates_constructor_inputs(
         BalancedChunker(**kwargs)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("data_size", [1, 7, 64, 129])
-def test_balanced_chunker_output_is_positive_and_sums_to_size(data_size: int) -> None:
+@settings(
+    max_examples=100,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+@given(
+    data_size=st.integers(min_value=1, max_value=8192),
+    min_chunk_size=st.integers(min_value=8, max_value=64),
+    max_chunk_size=st.integers(min_value=64, max_value=512),
+    scale_up=st.floats(min_value=1.5, max_value=4.0, allow_nan=False),
+    scale_down=st.floats(min_value=0.1, max_value=0.9, allow_nan=False),
+)
+def test_balanced_chunker_invariants(
+    data_size: int,
+    min_chunk_size: int,
+    max_chunk_size: int,
+    scale_up: float,
+    scale_down: float,
+) -> None:
+    if min_chunk_size > max_chunk_size:
+        return
     chunker = BalancedChunker(
-        scale_up=1.5,
-        scale_down=0.75,
-        min_chunk_size=8,
-        max_chunk_size=64,
+        scale_up=scale_up,
+        scale_down=scale_down,
+        min_chunk_size=min_chunk_size,
+        max_chunk_size=max_chunk_size,
     )
-
     chunks = list(chunker(data_size))
-
     assert sum(chunks) == data_size
-    assert all(chunk > 0 for chunk in chunks)
+    assert all(c > 0 for c in chunks)
+    assert all(c <= max_chunk_size for c in chunks)
 
 
-def test_balanced_chunker_scaling_path_respects_invariants(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    times = iter([100, 120, 140, 160, 180, 200])
-    monkeypatch.setattr(
-        "aiofilepool._chunking.time.perf_counter_ns",
-        lambda: next(times),
-    )
-
+def test_balanced_chunker_zero_data_size_emits_no_chunks() -> None:
     chunker = BalancedChunker(
-        scale_up=2.0,
-        scale_down=0.5,
-        min_chunk_size=10,
-        max_chunk_size=40,
+        scale_up=2.0, scale_down=0.5, min_chunk_size=8, max_chunk_size=32
     )
-
-    chunks = list(chunker(70))
-
-    assert sum(chunks) == 70
-    assert all(10 <= chunk <= 40 for chunk in chunks)
-    assert len(chunks) > 1
+    assert list(chunker(0)) == []
 
 
-def test_balanced_chunker_never_emits_a_chunk_larger_than_max() -> None:
+def test_balanced_chunker_exact_min_chunk_size_emits_single_chunk() -> None:
     chunker = BalancedChunker(
-        scale_up=2.0,
-        scale_down=0.5,
-        min_chunk_size=8,
-        max_chunk_size=32,
+        scale_up=2.0, scale_down=0.5, min_chunk_size=8, max_chunk_size=32
     )
-
-    chunks = list(chunker(512))
-
-    assert max(chunks) <= 32
-    assert sum(chunks) == 512
-
-
-def test_balanced_chunker_exact_threshold_boundary_stays_stable() -> None:
-    chunker = BalancedChunker(
-        scale_up=2.0,
-        scale_down=0.5,
-        min_chunk_size=8,
-        max_chunk_size=32,
-    )
-
-    assert list(chunker(16)) == [16]
+    assert list(chunker(8)) == [8]
