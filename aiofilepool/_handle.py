@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, AsyncGenerator
 from aiofilepool._base_io import AsyncBinaryIO, AsyncIOState
 from aiofilepool._chunking import Chunker
 from aiofilepool._modes import ModeSpec
-from aiofilepool._types import StrPath
+from aiofilepool._types import StrOrBytesPath
 from aiofilepool.errors import (
     IONotOpenError,
     IOInitializedError,
@@ -17,10 +17,13 @@ if TYPE_CHECKING:
     from aiofilepool._pool import FilePool
 
 
+_IS_POSIX = os.name == "posix"
+
+
 class FileHandle(AsyncBinaryIO):
-    def __init__(self, pool: "FilePool", path: StrPath, mode: ModeSpec):
+    def __init__(self, pool: "FilePool", path: StrOrBytesPath, mode: ModeSpec):
         self._pool = pool
-        self._path: str = os.fspath(path)
+        self._path: str | bytes = os.fspath(path)
         self._mode = mode
         self._position = 0
         self._size = 0
@@ -42,7 +45,7 @@ class FileHandle(AsyncBinaryIO):
         if self._mode.truncate:
             self._size = 0
         else:
-            stats = await self._pool.stat(self._path)
+            stats = await self._pool.fs.stat(self._path)
             self._size = stats.st_size
         self._state = AsyncIOState.OPEN
         return self
@@ -228,6 +231,26 @@ class FileHandle(AsyncBinaryIO):
                             yield data
                 finally:
                     self._position = resolved_offset + consumed_size
+
+    async def allocate(self, length: int) -> None:
+        if not self._mode.write:
+            raise InvalidFileModeError("file is not writable")
+        if length < 0:
+            raise InvalidPositionError("length must be >= 0")
+        async with self._op_lock:
+            if self._state != AsyncIOState.OPEN:
+                raise IONotOpenError()
+            if length < self._size:
+                return
+
+            async with self._acquire_fd() as fd:
+                if _IS_POSIX:
+                    await self._pool._run_blocking(
+                        os.posix_fallocate, fd.fileno(), 0, length
+                    )
+                else:
+                    await self._pool._run_blocking(fd.truncate, length)
+                self._size = length
 
     async def close(self) -> None:
         async with self._op_lock:

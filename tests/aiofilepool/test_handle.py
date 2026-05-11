@@ -1,8 +1,10 @@
+import os
 from pathlib import Path
 
 import pytest
 
-from aiofilepool import FileHandle, ModeSpec, StrPath
+from aiofilepool import FileHandle, ModeSpec, StrOrBytesPath
+from aiofilepool._fs import AsyncFileSystem
 from aiofilepool.errors import (
     IONotOpenError,
     FilePoolNotOpenError,
@@ -14,21 +16,39 @@ from aiofilepool.errors import (
 pytestmark = pytest.mark.asyncio
 
 
-def _as_path(path: Path) -> StrPath:
+class _PathBytes:
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    def __fspath__(self) -> bytes:
+        return self._raw
+
+
+def _as_path(path: Path) -> StrOrBytesPath:
     return path
 
 
-def _as_str(path: Path) -> StrPath:
+def _as_str(path: Path) -> StrOrBytesPath:
     return str(path)
 
 
-@pytest.mark.parametrize(
-    "path_factory",
-    [
-        pytest.param(_as_path, id="path"),
-        pytest.param(_as_str, id="str"),
-    ],
-)
+def _as_bytes(path: Path) -> StrOrBytesPath:
+    return os.fsencode(path)
+
+
+def _as_path_bytes(path: Path) -> StrOrBytesPath:
+    return _PathBytes(os.fsencode(path))
+
+
+_PATH_FACTORIES = [
+    pytest.param(_as_path, id="path"),
+    pytest.param(_as_str, id="str"),
+    pytest.param(_as_bytes, id="bytes"),
+    pytest.param(_as_path_bytes, id="path-bytes"),
+]
+
+
+@pytest.mark.parametrize("path_factory", _PATH_FACTORIES)
 async def test_direct_filehandle_constructor_accepts_strpath_for_read_mode(
     pool_factory, file_writer, path_factory
 ) -> None:
@@ -41,13 +61,7 @@ async def test_direct_filehandle_constructor_accepts_strpath_for_read_mode(
         assert await handle.read() == b"hello"
 
 
-@pytest.mark.parametrize(
-    "path_factory",
-    [
-        pytest.param(_as_path, id="path"),
-        pytest.param(_as_str, id="str"),
-    ],
-)
+@pytest.mark.parametrize("path_factory", _PATH_FACTORIES)
 async def test_direct_filehandle_constructor_normalizes_truncate_modes(
     pool_factory, file_writer, path_factory
 ) -> None:
@@ -171,3 +185,189 @@ async def test_missing_path_read_handle_raises_during_initialization(
         handle = pool.open(missing_path, "r")
         with pytest.raises(FileNotFoundError):
             await handle
+
+
+def _ensure_posix_fallocate(monkeypatch) -> None:
+    if not hasattr(os, "posix_fallocate"):
+
+        def posix_fallocate(fd, offset, length):
+            os.ftruncate(fd, length)
+
+        monkeypatch.setattr(os, "posix_fallocate", posix_fallocate, raising=False)
+
+
+async def test_allocate_grows_empty_file_posix_branch(
+    pool_factory, file_writer, monkeypatch
+) -> None:
+    path = file_writer("allocate-posix.bin", b"")
+    monkeypatch.setattr("aiofilepool._handle._IS_POSIX", True)
+    _ensure_posix_fallocate(monkeypatch)
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "w+")
+        await handle.allocate(1024)
+        await handle.close()
+
+    assert path.stat().st_size == 1024
+
+
+async def test_allocate_grows_empty_file_windows_branch(
+    pool_factory, file_writer, monkeypatch
+) -> None:
+    path = file_writer("allocate-win.bin", b"")
+    monkeypatch.setattr("aiofilepool._handle._IS_POSIX", False)
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "w+")
+        await handle.allocate(2048)
+        await handle.close()
+
+    assert path.stat().st_size == 2048
+
+
+async def test_allocate_posix_branch_calls_posix_fallocate(
+    pool_factory, file_writer, monkeypatch
+) -> None:
+    path = file_writer("allocate-spy-posix.bin", b"")
+    monkeypatch.setattr("aiofilepool._handle._IS_POSIX", True)
+    _ensure_posix_fallocate(monkeypatch)
+
+    async with pool_factory() as pool:
+        recorded: list[str] = []
+        original_run_blocking = pool._run_blocking
+
+        async def spy(func, *args):
+            recorded.append(func.__name__)
+            return await original_run_blocking(func, *args)
+
+        monkeypatch.setattr(pool, "_run_blocking", spy)
+
+        handle = await pool.open(path, "w+")
+        await handle.allocate(512)
+        await handle.close()
+
+        assert "posix_fallocate" in recorded
+        assert "truncate" not in recorded
+
+
+async def test_allocate_windows_branch_calls_truncate(
+    pool_factory, file_writer, monkeypatch
+) -> None:
+    path = file_writer("allocate-spy-win.bin", b"")
+    monkeypatch.setattr("aiofilepool._handle._IS_POSIX", False)
+
+    async with pool_factory() as pool:
+        recorded: list[str] = []
+        original_run_blocking = pool._run_blocking
+
+        async def spy(func, *args):
+            recorded.append(func.__name__)
+            return await original_run_blocking(func, *args)
+
+        monkeypatch.setattr(pool, "_run_blocking", spy)
+
+        handle = await pool.open(path, "w+")
+        await handle.allocate(512)
+        await handle.close()
+
+        assert "truncate" in recorded
+        assert "posix_fallocate" not in recorded
+
+
+@pytest.mark.parametrize("is_posix", [True, False], ids=["posix", "windows"])
+async def test_allocate_is_noop_when_length_below_current_size(
+    pool_factory, file_writer, monkeypatch, is_posix
+) -> None:
+    path = file_writer("allocate-noop.bin", b"0123456789")
+    monkeypatch.setattr("aiofilepool._handle._IS_POSIX", is_posix)
+    if is_posix:
+        _ensure_posix_fallocate(monkeypatch)
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "r+")
+
+        recorded: list[str] = []
+        original_run_blocking = pool._run_blocking
+
+        async def spy(func, *args):
+            recorded.append(func.__name__)
+            return await original_run_blocking(func, *args)
+
+        monkeypatch.setattr(pool, "_run_blocking", spy)
+
+        await handle.allocate(3)
+        await handle.close()
+
+    assert "posix_fallocate" not in recorded
+    assert "truncate" not in recorded
+    assert path.stat().st_size == 10
+
+
+async def test_allocate_rejects_read_only_mode(pool_factory, file_writer) -> None:
+    path = file_writer("allocate-readonly.bin", b"data")
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "r")
+        with pytest.raises(InvalidFileModeError, match="file is not writable"):
+            await handle.allocate(100)
+
+
+async def test_allocate_rejects_negative_length(pool_factory, file_writer) -> None:
+    path = file_writer("allocate-negative.bin", b"")
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "w+")
+        with pytest.raises(InvalidPositionError, match="length must be >= 0"):
+            await handle.allocate(-1)
+
+
+async def test_allocate_rejects_closed_handle(pool_factory, file_writer) -> None:
+    path = file_writer("allocate-closed.bin", b"")
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "w+")
+        await handle.close()
+
+        with pytest.raises(IONotOpenError):
+            await handle.allocate(8)
+
+
+async def test_allocate_rejects_uninitialized_handle(pool_factory, file_writer) -> None:
+    path = file_writer("allocate-uninit.bin", b"")
+
+    async with pool_factory() as pool:
+        handle = pool.open(path, "w+")
+        with pytest.raises(IONotOpenError):
+            await handle.allocate(8)
+
+
+async def test_allocate_updates_handle_size(
+    pool_factory, file_writer, monkeypatch
+) -> None:
+    path = file_writer("allocate-size.bin", b"")
+    monkeypatch.setattr("aiofilepool._handle._IS_POSIX", False)
+
+    async with pool_factory() as pool:
+        handle = await pool.open(path, "w+")
+        await handle.allocate(64)
+        assert await handle.size() == 64
+        assert await handle.read(offset=0) == b"\x00" * 64
+        assert await handle.tell() == 64
+
+
+async def test_initialize_uses_pool_fs_stat(pool_factory, file_writer) -> None:
+    path = file_writer("init-uses-fs.bin", b"hello world")
+    stat_calls: list[str | bytes] = []
+
+    class _SpyFS(AsyncFileSystem):
+        async def stat(self, p):
+            stat_calls.append(p)
+            return await super().stat(p)
+
+    async with pool_factory() as pool:
+        pool.fs = _SpyFS(pool)
+
+        handle = await pool.open(path, "r")
+
+        assert stat_calls == [os.fspath(path)]
+        assert await handle.size() == 11

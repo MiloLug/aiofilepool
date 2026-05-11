@@ -1,10 +1,12 @@
 import asyncio
+import os
 import threading
 from pathlib import Path
 
 import pytest
 
-from aiofilepool import FilePool, StrPath
+from aiofilepool import FilePool, StrOrBytesPath
+from aiofilepool._fs import AsyncFileSystem
 from aiofilepool.errors import FilePoolNotOpenError
 
 from .conftest import AsyncGate, FailingIO
@@ -13,12 +15,36 @@ from .conftest import AsyncGate, FailingIO
 pytestmark = pytest.mark.asyncio
 
 
-def _as_path(path: Path) -> StrPath:
+class _PathBytes:
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    def __fspath__(self) -> bytes:
+        return self._raw
+
+
+def _as_path(path: Path) -> StrOrBytesPath:
     return path
 
 
-def _as_str(path: Path) -> StrPath:
+def _as_str(path: Path) -> StrOrBytesPath:
     return str(path)
+
+
+def _as_bytes(path: Path) -> StrOrBytesPath:
+    return os.fsencode(path)
+
+
+def _as_path_bytes(path: Path) -> StrOrBytesPath:
+    return _PathBytes(os.fsencode(path))
+
+
+_PATH_FACTORIES = [
+    pytest.param(_as_path, id="path"),
+    pytest.param(_as_str, id="str"),
+    pytest.param(_as_bytes, id="bytes"),
+    pytest.param(_as_path_bytes, id="path-bytes"),
+]
 
 
 async def test_pool_context_manager_closes_and_close_is_idempotent(
@@ -47,22 +73,8 @@ async def test_open_after_close_raises_not_open(pool_factory, file_writer) -> No
         pool.open(path, "w+")
 
 
-async def test_stat_returns_size_for_existing_file(pool_factory, file_writer) -> None:
-    path = file_writer("stats.bin", b"abcdef")
-
-    async with pool_factory() as pool:
-        stat = await pool.stat(path)
-        assert stat.st_size == 6
-
-
-@pytest.mark.parametrize(
-    "path_factory",
-    [
-        pytest.param(_as_path, id="path"),
-        pytest.param(_as_str, id="str"),
-    ],
-)
-async def test_open_accepts_strpath_inputs(
+@pytest.mark.parametrize("path_factory", _PATH_FACTORIES)
+async def test_open_accepts_strorbytes_path_inputs(
     pool_factory, file_writer, path_factory
 ) -> None:
     path = file_writer("strpath-open.bin", b"")
@@ -236,3 +248,32 @@ async def test_pool_close_surfaces_cold_descriptor_flush_errors_after_other_clea
 async def test_file_pool_constructor_rejects_invalid_descriptor_pool_size() -> None:
     with pytest.raises(ValueError, match="max_descriptors must be >= 1"):
         FilePool(descriptor_pool_size=0)
+
+
+async def test_default_fs_is_async_file_system_bound_to_pool(pool_factory) -> None:
+    async with pool_factory() as pool:
+        assert isinstance(pool.fs, AsyncFileSystem)
+        assert pool.fs._pool is pool
+
+
+async def test_custom_fs_is_honored_via_constructor_kwarg(file_writer) -> None:
+    path = file_writer("custom-fs.bin", b"abcdef")
+    stat_calls: list[str | bytes] = []
+
+    class _SpyFS(AsyncFileSystem):
+        def __init__(self) -> None:
+            self._pool = None  # type: ignore[assignment]
+            self.stat_calls = stat_calls
+
+        async def stat(self, p):
+            self.stat_calls.append(p)
+            return os.stat(p)
+
+    spy = _SpyFS()
+    pool = FilePool(descriptor_pool_size=4, thread_pool_size=1, fs=spy)
+
+    async with pool:
+        assert pool.fs is spy
+        handle = await pool.open(path, "r")
+        assert stat_calls == [os.fspath(path)]
+        assert await handle.size() == 6

@@ -2,15 +2,15 @@ import asyncio
 from enum import IntEnum
 import functools
 from concurrent.futures.thread import ThreadPoolExecutor
-import os
 from collections.abc import Callable
 from typing import Any, BinaryIO, Self
 
 from aiofilepool._binary_io import BinaryIOAdapter
 from aiofilepool._chunking import BalancedChunker, Chunker
 from aiofilepool._fd_manager import FileDescriptorManager
+from aiofilepool._fs import AsyncFileSystem
 from aiofilepool._handle import FileHandle
-from aiofilepool._types import StrPath
+from aiofilepool._types import StrOrBytesPath
 from aiofilepool.errors import FilePoolNotOpenError
 
 from ._modes import ModeSpec
@@ -30,6 +30,7 @@ class FilePool:
         loop: asyncio.AbstractEventLoop | None = None,
         chunker: Chunker = BalancedChunker(),
         chunking_threshold: int = 128 * 1024 * 1024,
+        fs: AsyncFileSystem | None = None,
     ):
         """
         Args:
@@ -39,6 +40,7 @@ class FilePool:
             loop: The event loop to use.
             chunker: The chunker to use.
             chunking_threshold: The size threshold at which to use chunking.
+            fs: The file system tools to use. If None, a default implementation will be used.
         """
         self._thread_pool_size = thread_pool_size
         self._loop = loop or asyncio.get_running_loop()
@@ -52,6 +54,7 @@ class FilePool:
         self._close_task: asyncio.Task[None] | None = None
         self._chunker = chunker
         self._chunking_threshold = chunking_threshold
+        self.fs = fs or AsyncFileSystem(self)
 
     async def __aenter__(self) -> Self:
         return self
@@ -70,10 +73,6 @@ class FilePool:
             raise
         else:
             self._state = FilePoolState.CLOSED
-
-    async def stat(self, path: StrPath) -> os.stat_result:
-        stat = await self._run_blocking(os.stat, os.fspath(path))
-        return stat
 
     async def _run_blocking[T](self, func: Callable[..., T], *args: Any) -> T:
         if self._executor is None:
@@ -94,7 +93,7 @@ class FilePool:
 
     def open(
         self,
-        path: StrPath,
+        path: StrOrBytesPath,
         mode: str = "r",
     ) -> FileHandle:
         self._open_guard()

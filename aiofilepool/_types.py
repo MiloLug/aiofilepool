@@ -1,5 +1,5 @@
-import os
+from os import PathLike
 
-type StrPath = str | os.PathLike[str]
 
-__all__ = ["StrPath"]
+type StrOrBytesPath = str | bytes | PathLike[str] | PathLike[bytes]
+type FileDescriptorOrPath = int | StrOrBytesPath
