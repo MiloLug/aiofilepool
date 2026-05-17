@@ -246,7 +246,10 @@ class FileHandle(AsyncBinaryIO):
             async with self._acquire_fd() as fd:
                 if _IS_POSIX:
                     await self._pool._run_blocking(
-                        os.posix_fallocate, fd.fileno(), 0, length
+                        os.posix_fallocate,  # type: ignore[attr-defined]
+                        fd.fileno(),
+                        0,
+                        length,
                     )
                 else:
                     await self._pool._run_blocking(fd.truncate, length)
