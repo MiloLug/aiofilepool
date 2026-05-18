@@ -3,7 +3,7 @@ from enum import IntEnum
 import functools
 from concurrent.futures.thread import ThreadPoolExecutor
 from collections.abc import Callable
-from typing import Any, BinaryIO, Self
+from typing import BinaryIO, Self
 
 from aiofilepool._binary_io import BinaryIOAdapter
 from aiofilepool._chunking import BalancedChunker, Chunker
@@ -74,7 +74,7 @@ class FilePool:
         else:
             self._state = FilePoolState.CLOSED
 
-    async def _run_blocking[T](self, func: Callable[..., T], *args: Any) -> T:
+    async def _run_blocking[T](self, func: Callable[..., T], *args: object) -> T:
         if self._executor is None:
             result = func(*args)
             await asyncio.sleep(0)
