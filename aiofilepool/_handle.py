@@ -240,7 +240,7 @@ class FileHandle(AsyncBinaryIO):
         async with self._op_lock:
             if self._state != AsyncIOState.OPEN:
                 raise IONotOpenError()
-            if length < self._size:
+            if length <= self._size:
                 return
 
             async with self._acquire_fd() as fd:
