@@ -8,7 +8,6 @@ Pins:
 * cursor advancement and `offset=` override on read / write
 * `seek` whence variants, EOF soft-clamp, negative-position reject
 * chunked-path activation at `chunking_threshold`, custom chunker honored
-* `chunks()` past-EOF early-returns; `aclose()` mid-stream restores cursor
 * mode/access matrix (read/write/chunks/truncate)
 * state-machine errors: double-init, uninitialized ops, post-close ops
 * `BinaryIOAdapter` quirks: does not close underlying io, survives pool close
@@ -79,7 +78,6 @@ async def test_seek_whence_variants_clamp_at_eof_and_reject_negative(
         assert await case.io.seek(2) == 2
         assert await case.io.seek(1, 1) == 3
         assert await case.io.seek(-1, 2) == 5
-        # Past-EOF seek soft-clamps to size.
         assert await case.io.seek(999, 2) == 6
 
         with pytest.raises(InvalidPositionError):
@@ -129,7 +127,6 @@ async def test_zero_size_read_returns_empty_and_updates_position(
     async_io_case_factory,
 ) -> None:
     async with async_io_case_factory(data=b"abcdef") as case:
-        # offset clamps past-EOF reads to file size; size=0 still updates position.
         assert await case.io.read(size=0, offset=2) == b""
         assert await case.io.tell() == 2
 
@@ -183,7 +180,6 @@ async def test_chunks_negative_offset_or_size_rejected(async_io_case_factory) ->
 
 
 async def test_chunks_past_eof_yields_no_data(async_io_case_factory) -> None:
-    """`chunks()` with offset past EOF early-returns: no chunks yielded, position == size."""
     async with async_io_case_factory(data=b"abc") as case:
         chunks = [chunk async for chunk in case.io.chunks(size=10, offset=100)]
         assert chunks == []

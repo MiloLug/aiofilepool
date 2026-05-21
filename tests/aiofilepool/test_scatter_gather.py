@@ -208,7 +208,7 @@ async def test_two_handles_scatter_writes_under_cap_one_preserve_both_files(
     assert bytes_b == expected
 
 
-# --- Deterministic regression: maximum fan-out under cap=4 --------------------
+# --- Maximum fan-out under cap=4 ----------------------------------------------
 
 
 async def test_download_fan_out_under_cap_pressure_preserves_every_file(

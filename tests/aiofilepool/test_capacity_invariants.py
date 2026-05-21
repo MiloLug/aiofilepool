@@ -1,13 +1,12 @@
 """Capacity-bound and slot-accounting invariants under random concurrent operations.
 
-Extends the prior `test_capacity_property.py` with mixed-op generation (write /
-read / close-and-reopen) and structural invariants on the `FileDescriptorManager`'s
-internal sets — not just the descriptor count, but the relationships between
-`_descriptors`, `_cold_handles`, `_inactive_handles`, and `_slots`.
+Mixed-op generation (write / read / close-and-reopen) with structural invariants
+on the `FileDescriptorManager`'s internal sets — not just the descriptor count,
+but the relationships between `_descriptors`, `_cold_handles`,
+`_inactive_handles`, and `_slots`.
 
 The pool's defining contract: at most `cap` OS descriptors are open simultaneously,
-even when the caller holds `>> cap` logical handles. This file pins the contract
-under Hypothesis-generated op sequences.
+even when the caller holds `>> cap` logical handles.
 """
 
 import asyncio

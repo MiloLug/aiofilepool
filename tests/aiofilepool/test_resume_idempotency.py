@@ -6,8 +6,8 @@ Real download flow:
    parts → close.
 
 The pool MUST treat `allocate(length)` as a no-op when `length <= current size`, with
-no dispatched blocking call (verified via `count_blocking_calls` spy). Partial-then-
-resumed flows must produce the same final file as a one-shot scatter.
+no dispatched blocking call. Partial-then-resumed flows must produce the same final
+file as a one-shot scatter.
 """
 
 import os
