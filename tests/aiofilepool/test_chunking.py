@@ -1,7 +1,6 @@
 """Property-based tests for `FixedChunker` and `BalancedChunker`.
 
-Replaces a stack of example tests with Hypothesis property tests that verify
-the load-bearing chunker invariants:
+Hypothesis property tests verify the load-bearing chunker invariants:
 
 * `sum(chunks) == data_size`
 * every chunk is `> 0`
@@ -9,8 +8,6 @@ the load-bearing chunker invariants:
 * min/max bounds are respected when `data_size` allows
 
 Plus a small set of constructor-validation example tests retained verbatim.
-
-See final-test-review.md §7 #15.
 """
 
 import pytest

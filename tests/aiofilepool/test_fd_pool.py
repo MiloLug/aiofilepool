@@ -1,7 +1,7 @@
 """`FileDescriptorManager` mechanics under capacity pressure.
 
-Replaces the old `test_fd_lifecycle.py`. Pins the slot-accounting and
-hot/cold/inactive transitions of the descriptor manager:
+Pins the slot-accounting and hot/cold/inactive transitions of the descriptor
+manager:
 
 * round-robin under `cap=1`: two handles share one slot without data loss
 * waiters on `_ensure_slot` wake on release AND on pool close (with
@@ -378,8 +378,6 @@ async def test_adapter_close_completes_while_write_inflight(
 async def test_cold_eviction_failure_does_not_deadlock_future_operations(
     pool_factory, file_writer, monkeypatch
 ) -> None:
-    """If a cold descriptor's flush fails during eviction, the error surfaces; but
-    the slot must still be released so a retry can proceed."""
     path_one = file_writer("evict-one.bin", b"")
     path_two = file_writer("evict-two.bin", b"")
     bad_io = FailingIO(fail_on={"flush": 1})

@@ -1,8 +1,7 @@
 """Real OS-failure paths through the pool.
 
-Renamed from `test_fault_injection.py`. The shared `OSErrorIO` test double now
-lives in `conftest.py`. This module pins behavior under failures that production
-actually encounters:
+Pins behavior under failures that production actually encounters (the shared
+`OSErrorIO` test double lives in `conftest.py`):
 
 * `OSError(ENOSPC)` during `write()` — partial commit, no leaked fd
 * `PermissionError` during a renewal `open()` — slot released, sibling progresses
@@ -53,8 +52,6 @@ async def test_enospc_during_write_propagates_without_leaking_descriptor() -> No
 
 
 async def test_enospc_chunked_write_commits_prefix(tmp_path) -> None:
-    """A chunked write that fails mid-stream commits the bytes written before the
-    failure; `_size` and `_position` reflect that prefix."""
     failing = OSErrorIO(
         b"",
         fail_on="write",
@@ -284,8 +281,6 @@ async def test_cancellation_mid_allocate_keeps_pool_consistent(
 async def test_executor_pre_shutdown_surfaces_clean_error_and_close_still_terminates(
     tmp_path,
 ) -> None:
-    """Forcing the executor down before an op surfaces a `RuntimeError` from
-    `_run_blocking`. The pool must remain shutdownable (no hang)."""
     path = tmp_path / "exec-down.bin"
     path.write_bytes(b"")
 

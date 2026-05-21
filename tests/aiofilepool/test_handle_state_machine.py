@@ -207,6 +207,4 @@ _SM_SETTINGS = settings(
 
 
 def test_handle_state_machine_matches_shadow() -> None:
-    """Drive the rule-based state machine through random op sequences and confirm
-    every observable state agrees with the shadow model after every step."""
     run_state_machine_as_test(HandleStateMachine, settings=_SM_SETTINGS)

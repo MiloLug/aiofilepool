@@ -268,7 +268,6 @@ async def test_read_failure_leaves_io_usable(async_io_case_factory) -> None:
 async def test_chunked_write_failure_preserves_committed_prefix(
     async_io_case_factory,
 ) -> None:
-    """Mid-chunk failure: bytes written before failure are durable; size/position reflect prefix."""
     chunker = RecordingChunker([2, 2, 2])
     failing_io = FailingIO(fail_on={"write": 2})
 

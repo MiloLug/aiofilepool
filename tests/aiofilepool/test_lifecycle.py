@@ -1,6 +1,6 @@
 """`FilePool` lifecycle, cancellation safety, and `AsyncFileSystem` delegation.
 
-Subsumes the old `test_pool.py` + `test_fs.py`. Pins:
+Pins:
 * state machine: OPEN → CLOSING → CLOSED, idempotent close, post-close `open()` rejects
 * concurrent close callers share one underlying `_close_task` (assert by identity)
 * `close(timeout=)` raises `TimeoutError` without aborting; next `close()` finishes
@@ -220,8 +220,6 @@ async def test_run_blocking_shields_executor_from_cancellation(pool_factory) -> 
 async def test_close_surfaces_cold_descriptor_flush_error_after_other_cleanup(
     pool_factory, file_writer, monkeypatch
 ) -> None:
-    """If a cold descriptor's flush fails during pool close, the error surfaces but
-    the rest of the cleanup still runs to completion."""
     path_one = file_writer("flush-error-one.bin", b"")
     path_two = file_writer("flush-error-two.bin", b"")
     bad_io = FailingIO(fail_on={"flush": 1})
