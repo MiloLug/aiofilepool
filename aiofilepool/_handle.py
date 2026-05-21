@@ -187,8 +187,8 @@ class FileHandle(AsyncBinaryIO):
         if not self._mode.read:
             raise InvalidFileModeError("file is not readable")
 
-        if offset is not None and (offset < 0 or offset > self._size):
-            raise InvalidPositionError("offset must be in [0, file size]")
+        if offset is not None and offset < 0:
+            raise InvalidPositionError("offset must be >= 0")
 
         if size is not None and size < 0:
             raise InvalidPositionError("size must be >= 0")

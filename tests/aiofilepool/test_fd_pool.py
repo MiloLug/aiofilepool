@@ -1,3 +1,22 @@
+"""`FileDescriptorManager` mechanics under capacity pressure.
+
+Replaces the old `test_fd_lifecycle.py`. Pins the slot-accounting and
+hot/cold/inactive transitions of the descriptor manager:
+
+* round-robin under `cap=1`: two handles share one slot without data loss
+* waiters on `_ensure_slot` wake on release AND on pool close (with
+  `FilePoolNotOpenError`)
+* failed cold-descriptor flush during eviction surfaces the error but still
+  releases the slot (no deadlock for future waiters)
+* failed `open()` during reopen (activation from inactive) releases the slot
+  so a different handle can still acquire
+* discarding a cooled handle takes the `cold_handles` branch (slot is not
+  re-released, because cooling already released it)
+* `close()` drains cold descriptors and then waits for `_descriptors` empty
+* `close()` surfaces the first cleanup error while still draining the rest
+* a handle's `close()` waits for an inflight op before the descriptor is freed
+"""
+
 import asyncio
 import io
 
@@ -11,9 +30,14 @@ from .conftest import AsyncGate, FailingIO
 pytestmark = pytest.mark.asyncio
 
 
-async def test_descriptor_pool_size_one_reuses_handles_without_data_loss(
+# --- Round-robin under cap=1 --------------------------------------------------
+
+
+async def test_two_handles_round_robin_under_cap_of_one(
     pool_factory, file_writer
 ) -> None:
+    """`cap=1` forces the manager to swap fds between two handles; bytes on both files
+    must reflect every write."""
     path_one = file_writer("one.bin", b"")
     path_two = file_writer("two.bin", b"")
 
@@ -36,9 +60,11 @@ async def test_descriptor_pool_size_one_reuses_handles_without_data_loss(
         assert await handle_two.read() == b"two"
 
 
-async def test_reopening_inactive_handle_path_remains_read_write_capable(
+async def test_reopened_inactive_handle_remains_read_write_capable(
     pool_factory, file_writer
 ) -> None:
+    """A handle evicted to `_inactive_handles` and later reopened via `renewal_mode`
+    must regain full read/write access (no silent demotion to read-only)."""
     path_one = file_writer("reopen-one.bin", b"")
     path_two = file_writer("reopen-two.bin", b"")
 
@@ -49,6 +75,7 @@ async def test_reopening_inactive_handle_path_remains_read_write_capable(
         await handle_one.write(b"abc")
         await handle_two.write(b"xyz")
 
+        # Reactivate handle_one — evicts handle_two's fd.
         await handle_one.seek(0)
         assert await handle_one.read() == b"abc"
         await handle_one.seek(3)
@@ -60,6 +87,8 @@ async def test_reopening_inactive_handle_path_remains_read_write_capable(
 async def test_closed_handle_descriptor_is_discarded_for_future_handles(
     pool_factory, file_writer
 ) -> None:
+    """After a handle is closed, its descriptor is fully discarded — a new handle
+    on the same path opens a fresh descriptor and sees the persisted bytes."""
     path = file_writer("discard.bin", b"")
 
     async with pool_factory(descriptor_pool_size=1, thread_pool_size=0) as pool:
@@ -71,7 +100,10 @@ async def test_closed_handle_descriptor_is_discarded_for_future_handles(
         assert await second.read() == b"persisted"
 
 
-async def test_waiting_handle_resumes_after_active_handle_releases_descriptor(
+# --- Waiters: wake on release AND on pool close -------------------------------
+
+
+async def test_waiter_resumes_after_active_handle_releases_descriptor(
     stressed_pool_factory, file_writer, monkeypatch
 ) -> None:
     path_one = file_writer("wait-one.bin", b"")
@@ -101,6 +133,7 @@ async def test_waiting_handle_resumes_after_active_handle_releases_descriptor(
 
         second_task = asyncio.create_task(handle_two.write(b"two"))
         await asyncio.sleep(0)
+        # Second task is blocked waiting for a slot until the first finishes.
         assert second_started.is_set() is False
 
         gate.release()
@@ -113,9 +146,11 @@ async def test_waiting_handle_resumes_after_active_handle_releases_descriptor(
     assert path_two.read_bytes() == b"two"
 
 
-async def test_pool_close_unblocks_waiting_handle_with_not_open_error(
+async def test_pool_close_unblocks_waiter_with_not_open_error(
     stressed_pool_factory, file_writer, monkeypatch
 ) -> None:
+    """A task waiting for a slot must wake with `FilePoolNotOpenError` when the
+    pool transitions to closed."""
     path_one = file_writer("close-waits-one.bin", b"")
     path_two = file_writer("close-waits-two.bin", b"")
     gate = AsyncGate()
@@ -153,10 +188,14 @@ async def test_pool_close_unblocks_waiting_handle_with_not_open_error(
         assert path_one.read_bytes() == b"one"
 
 
-async def test_same_handle_operations_are_serialized_until_current_op_finishes(
+# --- Per-handle op serialization ----------------------------------------------
+
+
+async def test_handle_op_lock_serializes_same_handle_operations(
     pool_factory, file_writer, monkeypatch
 ) -> None:
-    path = file_writer("same-handle-serialization.bin", b"")
+    """`_op_lock` ensures that two writes on the same handle execute strictly serially."""
+    path = file_writer("serialize.bin", b"")
     gate = AsyncGate()
     second_started = asyncio.Event()
 
@@ -220,6 +259,8 @@ async def test_cancelling_handle_write_leaves_handle_usable(
         with pytest.raises(asyncio.CancelledError):
             await write_task
 
+        # The write was shielded — the bytes did land — but the handle remains usable
+        # for a subsequent overwrite at offset=0.
         assert await handle.write(b"xyz", offset=0) == 3
         assert await handle.read(offset=0) == b"xyz"
 
@@ -257,10 +298,10 @@ async def test_cancelling_adapter_write_leaves_adapter_usable(
         assert await adapter.read(offset=0) == b"xyz"
 
 
-async def test_handle_close_waits_for_inflight_operation_before_closing(
+async def test_handle_close_waits_for_inflight_operation_before_freeing_descriptor(
     pool_factory, file_writer, monkeypatch
 ) -> None:
-    path = file_writer("handle-close-race.bin", b"")
+    path = file_writer("close-vs-write.bin", b"")
     gate = AsyncGate()
 
     async with pool_factory(thread_pool_size=1) as pool:
@@ -295,9 +336,11 @@ async def test_handle_close_waits_for_inflight_operation_before_closing(
     assert path.read_bytes() == b"abc"
 
 
-async def test_adapter_close_can_finish_while_write_is_in_flight(
+async def test_adapter_close_completes_while_write_inflight(
     pool_factory, monkeypatch
 ) -> None:
+    """Adapters don't hold a pool descriptor — `close()` need not wait for an inflight
+    write to release a resource. But the write is allowed to finish."""
     gate = AsyncGate()
     backing = io.BytesIO()
 
@@ -329,9 +372,14 @@ async def test_adapter_close_can_finish_while_write_is_in_flight(
     assert backing.getvalue() == b"abc"
 
 
-async def test_cold_descriptor_eviction_failure_does_not_block_future_operations(
+# --- Eviction failure paths ---------------------------------------------------
+
+
+async def test_cold_eviction_failure_does_not_deadlock_future_operations(
     pool_factory, file_writer, monkeypatch
 ) -> None:
+    """If a cold descriptor's flush fails during eviction, the error surfaces; but
+    the slot must still be released so a retry can proceed."""
     path_one = file_writer("evict-one.bin", b"")
     path_two = file_writer("evict-two.bin", b"")
     bad_io = FailingIO(fail_on={"flush": 1})
@@ -352,13 +400,83 @@ async def test_cold_descriptor_eviction_failure_does_not_block_future_operations
         with pytest.raises(RuntimeError, match="flush failed"):
             await handle_two.write(b"two")
 
+        # Retry must succeed — proves slot was released even on the failure path.
         assert await asyncio.wait_for(handle_two.write(b"two"), timeout=0.2) == 3
 
 
-async def test_handle_close_can_be_retried_after_discard_failure(
+async def test_failed_open_on_reopen_releases_slot(
     pool_factory, file_writer, monkeypatch
 ) -> None:
-    path = file_writer("discard-failure.bin", b"")
+    """When activation from inactive fails (the renewal `open()` raises), the slot
+    must be released so a sibling handle can still acquire."""
+    path_a = file_writer("reopen-fail-a.bin", b"a")
+    path_b = file_writer("reopen-fail-b.bin", b"b")
+
+    async with pool_factory(descriptor_pool_size=1, thread_pool_size=0) as pool:
+        handle_a = await pool.open(path_a, "r+b")
+        handle_b = await pool.open(path_b, "r+b")
+
+        # Touch a to bring it active, then touch b to make a inactive.
+        await handle_a.read(offset=0)
+        await handle_b.read(offset=0)
+        # Now a is in _inactive_handles, b is in _cold_handles.
+        assert handle_a in pool._fd_manager._inactive_handles
+        assert handle_b in pool._fd_manager._cold_handles
+
+        # Inject failure on the next open() (which will be a's renewal).
+        original_open = open
+        call_count = {"n": 0}
+
+        def failing_open(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise OSError("injected reopen failure")
+            return original_open(*args, **kwargs)
+
+        monkeypatch.setattr("aiofilepool._fd_manager.open", failing_open, raising=False)
+
+        with pytest.raises(OSError, match="injected reopen failure"):
+            await handle_a.read(offset=0)
+
+        # If the slot leaked, this would deadlock under wait_for.
+        assert await asyncio.wait_for(handle_b.read(offset=0), timeout=2.0) == b"b"
+
+
+async def test_discarding_cold_handle_does_not_re_release_slot(
+    pool_factory, file_writer
+) -> None:
+    """A handle that was cooled has already released its slot; discarding it must
+    not release a second time (which would corrupt the slot count)."""
+    path_a = file_writer("cold-discard-a.bin", b"")
+    path_b = file_writer("cold-discard-b.bin", b"")
+
+    async with pool_factory(descriptor_pool_size=1, thread_pool_size=0) as pool:
+        handle_a = await pool.open(path_a, "w+")
+        await handle_a.write(b"a-data")
+
+        assert handle_a in pool._fd_manager._cold_handles
+        slots_before = pool._fd_manager._slots
+
+        await handle_a.close()
+
+        # Slots count is unchanged (the cooled state had already counted as available).
+        assert pool._fd_manager._slots == slots_before
+        assert handle_a not in pool._fd_manager._cold_handles
+        assert handle_a not in pool._fd_manager._descriptors
+
+        # A subsequent acquire still works and slot count stays bounded.
+        handle_b = await pool.open(path_b, "w+")
+        await handle_b.write(b"b-data")
+        assert await handle_b.read(offset=0) == b"b-data"
+        assert pool._fd_manager._slots <= 1
+
+
+async def test_handle_close_after_discard_failure_can_be_retried(
+    pool_factory, file_writer, monkeypatch
+) -> None:
+    """If a handle's underlying flush fails on `close()`, the error surfaces, but a
+    retry succeeds (the descriptor was popped before the flush attempt)."""
+    path = file_writer("discard-fail.bin", b"")
     failing_io = FailingIO(fail_on={"flush": 1})
 
     monkeypatch.setattr(
@@ -374,6 +492,7 @@ async def test_handle_close_can_be_retried_after_discard_failure(
         with pytest.raises(RuntimeError, match="flush failed"):
             await handle.close()
 
+        # Retry close → idempotent return (state already CLOSED).
         await handle.close()
 
         with pytest.raises(IONotOpenError):
