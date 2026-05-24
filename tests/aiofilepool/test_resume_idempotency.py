@@ -161,7 +161,6 @@ async def test_resume_idempotent_allocate_after_reopen_does_not_redispatch(
         await handle.write(b"PAYLOAD", offset=10)
         await handle.close()
 
-    # Allocate dispatched nothing; only the write produced dispatches.
     assert "posix_fallocate" not in recorded
     assert "truncate" not in recorded
     assert path.stat().st_size == 256

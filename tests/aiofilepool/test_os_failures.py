@@ -221,10 +221,8 @@ async def test_posix_fallocate_enospc_does_not_advance_size(
         with pytest.raises(OSError):
             await handle.allocate(1_000_000)
 
-        # _size not advanced past actual file size.
         assert await handle.size() == 0
 
-        # Retry with a smaller allocate succeeds (slot was returned).
         await handle.allocate(64)
         assert await handle.size() == 64
         await handle.close()
@@ -269,7 +267,6 @@ async def test_cancellation_mid_allocate_keeps_pool_consistent(
         # Restore plain dispatch for the retry.
         monkeypatch.setattr(pool, "_run_blocking", original_run_blocking)
 
-        # Pool must still be usable: retry should succeed.
         await handle.allocate(128)
         assert await handle.size() == 128
         await handle.close()

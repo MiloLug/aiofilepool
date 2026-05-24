@@ -137,7 +137,6 @@ async def test_mixed_concurrent_reads_and_writes_on_disjoint_intervals(
         handle = await pool.open(path, "r+b")
         await handle.allocate(total_size)
 
-        # Drive writes and reads concurrently.
         write_tasks = [handle.write(data, offset=offset) for offset, data in write_half]
         read_tasks = [
             handle.read(size=len(data), offset=offset) for offset, data in read_half
@@ -146,7 +145,6 @@ async def test_mixed_concurrent_reads_and_writes_on_disjoint_intervals(
         results = await asyncio.gather(*write_tasks, *read_tasks)
         read_results = results[len(write_tasks) :]
 
-        # Each read returns its pre-written content.
         for (offset, data), got in zip(read_half, read_results):
             assert got == data, f"read slice at offset={offset} mismatched"
 

@@ -114,7 +114,6 @@ async def test_capacity_and_structural_invariants_hold_under_random_ops(
 
             _assert_manager_invariants(pool, cap)
 
-        # Final read-back: each file equals the deterministic write order.
         for i, handle in enumerate(handles):
             await handle.seek(0)
             got = await handle.read()
@@ -156,7 +155,6 @@ async def test_capacity_invariant_under_concurrent_writes(
     for p in paths:
         p.touch()
 
-    # Random concurrent payloads.
     per_handle_payloads: list[list[bytes]] = []
     for _ in range(handle_count):
         n = rng.randint(1, 4)
@@ -187,7 +185,6 @@ async def test_capacity_invariant_under_concurrent_writes(
         assert max_observed <= cap
         _assert_manager_invariants(pool, cap)
 
-        # Read-back equals concatenation per file.
         for i, handle in enumerate(handles):
             await handle.seek(0)
             data = await handle.read()

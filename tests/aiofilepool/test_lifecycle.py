@@ -47,7 +47,6 @@ async def test_async_context_manager_closes_and_close_is_idempotent(
     with pytest.raises(FilePoolNotOpenError):
         pool.open(path, "r")
 
-    # Second close() is a no-op (returns without raising).
     await pool.close()
 
 
@@ -145,7 +144,6 @@ async def test_cancelled_first_close_waiter_still_drives_pool_to_closed(
     with pytest.raises(asyncio.CancelledError):
         await first_waiter
 
-    # Subsequent close() finishes the drain and transitions to CLOSED.
     await pool.close()
 
     with pytest.raises(FilePoolNotOpenError):
