@@ -70,7 +70,7 @@ async def test_allocate_rejects_negative_length(pool_factory, file_writer) -> No
 
     async with pool_factory() as pool:
         handle = await pool.open(path, "w+")
-        with pytest.raises(InvalidPositionError, match="length must be >= 0"):
+        with pytest.raises(InvalidPositionError, match="size must be >= 0"):
             await handle.allocate(-1)
 
 

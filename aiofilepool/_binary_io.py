@@ -190,6 +190,12 @@ class BinaryIOAdapter(AsyncBinaryIO):
             finally:
                 self._position = resolved_offset + consumed_size
 
+    async def fsync(self) -> None:
+        async with self._op_lock:
+            if self._state != AsyncIOState.OPEN:
+                raise IONotOpenError()
+            await self._pool._run_blocking(self._io.flush)
+
     async def close(self) -> None:
         if self._state != AsyncIOState.OPEN:
             return

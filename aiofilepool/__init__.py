@@ -4,6 +4,7 @@ from ._modes import ModeSpec
 from ._binary_io import BinaryIOAdapter
 from ._base_io import AsyncBinaryIO
 from ._types import StrOrBytesPath, FileDescriptorOrPath
+from ._chunking import Chunker, FixedChunker, BalancedChunker
 
 __all__ = [
     "FilePool",
@@ -13,4 +14,7 @@ __all__ = [
     "AsyncBinaryIO",
     "StrOrBytesPath",
     "FileDescriptorOrPath",
+    "Chunker",
+    "FixedChunker",
+    "BalancedChunker",
 ]

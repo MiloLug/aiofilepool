@@ -355,6 +355,20 @@ async def test_fs_copyfile_duplicates_contents(
         assert dst.read_bytes() == b"payload"
 
 
+async def test_fs_replace_overwrites_existing_destination(
+    pool_factory, file_writer, tmp_path
+) -> None:
+    src = file_writer("replace-src.bin", b"new")
+    dst = tmp_path / "replace-dst.bin"
+    dst.write_bytes(b"old")
+
+    async with pool_factory() as pool:
+        await pool.fs.replace(src, dst)
+
+        assert src.exists() is False
+        assert dst.read_bytes() == b"new"
+
+
 async def test_fs_remove_deletes_file(pool_factory, file_writer) -> None:
     path = file_writer("remove.bin", b"x")
 

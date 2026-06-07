@@ -9,6 +9,10 @@ class Chunker(ABC):
 
 
 class FixedChunker(Chunker):
+    """
+    A chunker that returns a fixed chunk size.
+    """
+
     __slots__ = ("_chunk_size",)
 
     def __init__(self, chunk_size: int):
@@ -26,6 +30,10 @@ class FixedChunker(Chunker):
 
 
 class BalancedChunker(Chunker):
+    """
+    A chunker that balances the chunk size based on the time it takes to read the chunk.
+    """
+
     __slots__ = ("_scale_up", "_scale_down", "_min_chunk_size", "_max_chunk_size")
 
     def __init__(
@@ -35,6 +43,14 @@ class BalancedChunker(Chunker):
         min_chunk_size: int = 1024 * 1024,
         max_chunk_size: int = 512 * 1024 * 1024,
     ):
+        """
+        Args:
+            scale_up: The factor to scale the chunk size up.
+            scale_down: The factor to scale the chunk size down.
+            min_chunk_size: The minimum chunk size.
+            max_chunk_size: The maximum chunk size.
+        """
+
         if scale_up <= 1:
             raise ValueError("scale_up must be > 1")
         if not (0 < scale_down < 1):

@@ -1,6 +1,6 @@
 import asyncio
 import os
-from typing import TYPE_CHECKING, AsyncGenerator
+from typing import IO, TYPE_CHECKING, AsyncGenerator
 
 from aiofilepool._base_io import AsyncBinaryIO, AsyncIOState
 from aiofilepool._chunking import Chunker
@@ -18,6 +18,12 @@ if TYPE_CHECKING:
 
 
 _IS_POSIX = os.name == "posix"
+
+
+def _flush_and_fsync(fd: IO) -> None:
+    # Flush the buffered userspace fd FIRST so the kernel sees the bytes
+    fd.flush()
+    os.fsync(fd.fileno())
 
 
 class FileHandle(AsyncBinaryIO):
@@ -162,6 +168,12 @@ class FileHandle(AsyncBinaryIO):
         return self._size
 
     async def truncate(self, size: int | None = None) -> None:
+        """
+        Truncate the file to the given size.
+
+        Args:
+            size: The size to truncate the file to. None -> truncate to the current position.
+        """
         if not self._mode.write:
             raise InvalidFileModeError("file is not writable")
         if size is not None and size < 0:
@@ -232,15 +244,23 @@ class FileHandle(AsyncBinaryIO):
                 finally:
                     self._position = resolved_offset + consumed_size
 
-    async def allocate(self, length: int) -> None:
+    async def allocate(self, size: int) -> None:
+        """
+        Allocate space in the file.
+        Does nothing if the file is already at least the given size.
+
+        Args:
+            size: The size to allocate.
+        """
+
         if not self._mode.write:
             raise InvalidFileModeError("file is not writable")
-        if length < 0:
-            raise InvalidPositionError("length must be >= 0")
+        if size < 0:
+            raise InvalidPositionError("size must be >= 0")
         async with self._op_lock:
             if self._state != AsyncIOState.OPEN:
                 raise IONotOpenError()
-            if length <= self._size:
+            if size <= self._size:
                 return
 
             async with self._acquire_fd() as fd:
@@ -249,11 +269,18 @@ class FileHandle(AsyncBinaryIO):
                         os.posix_fallocate,  # type: ignore[attr-defined]
                         fd.fileno(),
                         0,
-                        length,
+                        size,
                     )
                 else:
-                    await self._pool._run_blocking(fd.truncate, length)
-                self._size = length
+                    await self._pool._run_blocking(fd.truncate, size)
+                self._size = size
+
+    async def fsync(self) -> None:
+        async with self._op_lock:
+            if self._state != AsyncIOState.OPEN:
+                raise IONotOpenError()
+            async with self._acquire_fd() as fd:
+                await self._pool._run_blocking(_flush_and_fsync, fd)
 
     async def close(self) -> None:
         async with self._op_lock:

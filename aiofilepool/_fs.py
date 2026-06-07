@@ -21,6 +21,9 @@ class AsyncFileSystem:
     async def move(self, old: StrOrBytesPath, new: StrOrBytesPath) -> None:
         await self._pool._run_blocking(shutil.move, old, new)
 
+    async def replace(self, src: StrOrBytesPath, dst: StrOrBytesPath) -> None:
+        await self._pool._run_blocking(os.replace, src, dst)
+
     async def copyfile(self, src: StrOrBytesPath, dst: StrOrBytesPath) -> None:
         await self._pool._run_blocking(shutil.copyfile, src, dst)
 
