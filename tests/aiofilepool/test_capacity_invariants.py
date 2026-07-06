@@ -1,9 +1,9 @@
 """Capacity-bound and slot-accounting invariants under random concurrent operations.
 
 Mixed-op generation (write / read / close-and-reopen) with structural invariants
-on the `FileDescriptorManager`'s internal sets — not just the descriptor count,
-but the relationships between `_descriptors`, `_cold_handles`,
-`_inactive_handles`, and `_slots`.
+on the `FileDescriptorManager`'s internal state — not just the descriptor count,
+but the relationships between `_descriptors`, `_cold_handles`, `_slots`, and each
+handle's `_fd_materialized` flag.
 
 The pool's defining contract: at most `cap` OS descriptors are open simultaneously,
 even when the caller holds `>> cap` logical handles.
@@ -28,7 +28,6 @@ def _assert_manager_invariants(pool: FilePool, cap: int) -> None:
     mgr = pool._fd_manager  # noqa: SLF001
     descriptors_keys = set(mgr._descriptors.keys())  # noqa: SLF001
     cold = mgr._cold_handles  # noqa: SLF001
-    inactive = mgr._inactive_handles  # noqa: SLF001
     slots = mgr._slots  # noqa: SLF001
 
     assert len(descriptors_keys) <= cap, (
@@ -38,8 +37,8 @@ def _assert_manager_invariants(pool: FilePool, cap: int) -> None:
     assert cold.issubset(descriptors_keys), (
         f"cold {cold} not subset of descriptors {descriptors_keys}"
     )
-    assert inactive.isdisjoint(descriptors_keys), (
-        f"inactive {inactive} intersects descriptors {descriptors_keys}"
+    assert all(h._fd_materialized for h in descriptors_keys), (  # noqa: SLF001
+        f"open descriptor for never-materialized handle in {descriptors_keys}"
     )
 
 
@@ -210,6 +209,5 @@ async def test_descriptor_count_returns_to_zero_after_clean_close(
             await h.close()
 
         assert count_fd(pool) == 0
-        # Inactive set is also cleaned out — no zombie handle records.
-        assert len(pool._fd_manager._inactive_handles) == 0
+        # No zombie cold-handle records remain.
         assert len(pool._fd_manager._cold_handles) == 0

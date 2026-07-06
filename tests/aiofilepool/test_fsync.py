@@ -17,6 +17,8 @@ import pytest
 
 from aiofilepool.errors import IONotOpenError
 
+from .conftest import patch_descriptor_open
+
 
 pytestmark = pytest.mark.asyncio
 
@@ -40,9 +42,7 @@ async def test_handle_fsync_flushes_buffer_then_fsyncs_fd(
 ) -> None:
     events: list[object] = []
     rec = _RecordingFd(events)
-    monkeypatch.setattr(
-        "aiofilepool._fd_manager.open", lambda path, mode: rec, raising=False
-    )
+    patch_descriptor_open(monkeypatch, lambda path, mode: rec)
     monkeypatch.setattr(os, "fsync", lambda fileno: events.append(("fsync", fileno)))
 
     path = file_writer("fsync.bin", b"")

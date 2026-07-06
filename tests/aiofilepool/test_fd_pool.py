@@ -24,7 +24,7 @@ import pytest
 
 from aiofilepool.errors import FilePoolNotOpenError, IONotOpenError
 
-from .conftest import AsyncGate, FailingIO
+from .conftest import AsyncGate, FailingIO, patch_descriptor_open
 
 
 pytestmark = pytest.mark.asyncio
@@ -63,7 +63,7 @@ async def test_two_handles_round_robin_under_cap_of_one(
 async def test_reopened_inactive_handle_remains_read_write_capable(
     pool_factory, file_writer
 ) -> None:
-    """A handle evicted to `_inactive_handles` and later reopened via `renewal_mode`
+    """A handle whose descriptor was evicted and later reopened via `renewal_mode`
     must regain full read/write access (no silent demotion to read-only)."""
     path_one = file_writer("reopen-one.bin", b"")
     path_two = file_writer("reopen-two.bin", b"")
@@ -384,11 +384,7 @@ async def test_cold_eviction_failure_does_not_deadlock_future_operations(
     good_io = FailingIO()
     opened_ios = iter([bad_io, good_io])
 
-    monkeypatch.setattr(
-        "aiofilepool._fd_manager.open",
-        lambda path, mode: next(opened_ios),
-        raising=False,
-    )
+    patch_descriptor_open(monkeypatch, lambda path, mode: next(opened_ios))
 
     async with pool_factory(descriptor_pool_size=1, thread_pool_size=0) as pool:
         handle_one = await pool.open(path_one, "w+")
@@ -405,7 +401,7 @@ async def test_cold_eviction_failure_does_not_deadlock_future_operations(
 async def test_failed_open_on_reopen_releases_slot(
     pool_factory, file_writer, monkeypatch
 ) -> None:
-    """When activation from inactive fails (the renewal `open()` raises), the slot
+    """When reopening an evicted handle fails (the renewal `open()` raises), the slot
     must be released so a sibling handle can still acquire."""
     path_a = file_writer("reopen-fail-a.bin", b"a")
     path_b = file_writer("reopen-fail-b.bin", b"b")
@@ -417,8 +413,9 @@ async def test_failed_open_on_reopen_releases_slot(
         # Touch a to bring it active, then touch b to make a inactive.
         await handle_a.read(offset=0)
         await handle_b.read(offset=0)
-        # Now a is in _inactive_handles, b is in _cold_handles.
-        assert handle_a in pool._fd_manager._inactive_handles
+        # Now a is evicted (materialized but no live descriptor), b is in _cold_handles.
+        assert handle_a not in pool._fd_manager._descriptors
+        assert handle_a._fd_materialized
         assert handle_b in pool._fd_manager._cold_handles
 
         # Inject failure on the next open() (which will be a's renewal).
@@ -431,7 +428,7 @@ async def test_failed_open_on_reopen_releases_slot(
                 raise OSError("injected reopen failure")
             return original_open(*args, **kwargs)
 
-        monkeypatch.setattr("aiofilepool._fd_manager.open", failing_open, raising=False)
+        patch_descriptor_open(monkeypatch, failing_open)
 
         with pytest.raises(OSError, match="injected reopen failure"):
             await handle_a.read(offset=0)
@@ -477,11 +474,7 @@ async def test_handle_close_after_discard_failure_can_be_retried(
     path = file_writer("discard-fail.bin", b"")
     failing_io = FailingIO(fail_on={"flush": 1})
 
-    monkeypatch.setattr(
-        "aiofilepool._fd_manager.open",
-        lambda path, mode: failing_io,
-        raising=False,
-    )
+    patch_descriptor_open(monkeypatch, lambda path, mode: failing_io)
 
     async with pool_factory(thread_pool_size=0) as pool:
         handle = await pool.open(path, "w+")

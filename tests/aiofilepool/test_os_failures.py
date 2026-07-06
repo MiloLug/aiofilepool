@@ -21,7 +21,7 @@ import pytest
 
 from aiofilepool import FilePool
 
-from .conftest import OSErrorIO
+from .conftest import OSErrorIO, patch_descriptor_open
 
 
 pytestmark = pytest.mark.asyncio
@@ -108,17 +108,13 @@ async def test_permission_error_during_reopen_releases_slot(
                 )
             return original_open(*args, **kwargs)
 
-        monkeypatch.setattr(
-            "aiofilepool._fd_manager.open", _failing_open, raising=False
-        )
+        patch_descriptor_open(monkeypatch, _failing_open)
 
         with pytest.raises(PermissionError):
             await handle_b.write(b"beta")
 
         # Subsequent op on handle_a succeeds — proves no leaked slot.
-        monkeypatch.setattr(
-            "aiofilepool._fd_manager.open", original_open, raising=False
-        )
+        patch_descriptor_open(monkeypatch, original_open)
         await handle_a.write(b"second-write")
         await handle_a.close()
         await handle_b.close()
@@ -162,7 +158,7 @@ async def test_concurrent_acquire_after_failed_open_does_not_deadlock(
                 raise OSError(errno.EIO, "I/O error (injected)", str(args[0]))
             return original_open(*args, **kwargs)
 
-        monkeypatch.setattr("aiofilepool._fd_manager.open", _flaky_open, raising=False)
+        patch_descriptor_open(monkeypatch, _flaky_open)
 
         async def _try_open_a():
             handle = await pool.open(path_a, "rb")

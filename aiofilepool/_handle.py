@@ -31,6 +31,7 @@ class FileHandle(AsyncBinaryIO):
         self._pool = pool
         self._path: str | bytes = os.fspath(path)
         self._mode = mode
+        self._fd_materialized = False
         self._position = 0
         self._size = 0
         self._state = AsyncIOState.UNINITIALIZED
@@ -58,6 +59,17 @@ class FileHandle(AsyncBinaryIO):
 
     def _acquire_fd(self):
         return self._pool._fd_manager.acquire(self)
+
+    def _open_fd(self) -> IO:
+        """
+        Open a new file descriptor for the file.
+        Materialized means the file has been opened previously, so it should be created by now.
+        So we can use the renewal mode to open it (to avoid using the 'w' mode again, for example).
+        """
+        mode = self._mode.renewal_mode if self._fd_materialized else self._mode.mode
+        fd = open(self._path, mode)
+        self._fd_materialized = True
+        return fd
 
     async def read(self, size: int | None = None, offset: int | None = None) -> bytes:
         if not self._mode.read:

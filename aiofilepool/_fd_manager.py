@@ -26,13 +26,6 @@ class FileDescriptorManager:
         )  # Handles that are not acquired, but are open
         self._slots_cond = asyncio.Condition()
         self._slots = max_descriptors
-
-        # Handles that are not open, but were opened in the past.
-        # This is important, because to re-open them, we need to change the mode
-        # in a specific way, to avoid opening a file AGAIN with "w" flag (for example).
-        # TODO: maybe it's better to just add secondary mode and some flag to the FileHandle, to avoid this altogether?
-        self._inactive_handles: set[FileHandle] = set()
-
         self._closed = False
 
     async def _release_slot(self):
@@ -77,24 +70,12 @@ class FileDescriptorManager:
                 close_error = exc
 
         self._descriptors.pop(handle, None)
-        self._inactive_handles.add(handle)
         if close_error is not None:
             await self._release_slot()
             raise close_error
 
-    async def _activate_handle(self, handle: FileHandle) -> IO:
-        await self._ensure_slot()
-        try:
-            self._descriptors[handle] = open(handle._path, handle._mode.renewal_mode)
-            self._inactive_handles.discard(handle)
-        except BaseException:
-            await self._release_slot()
-            raise
-        return self._descriptors[handle]
-
     async def _discard_handle(self, handle: FileHandle) -> None:
         if handle not in self._descriptors:
-            self._inactive_handles.discard(handle)
             return
         try:
             fd = self._descriptors.pop(handle)
@@ -116,21 +97,10 @@ class FileDescriptorManager:
             self._slots -= 1
             assert self._slots >= 0, "Impossible state: slots cannot be negative"
 
-    async def _restore_descriptor(self, handle: FileHandle) -> IO | None:
-        if handle in self._descriptors:
-            if handle in self._cold_handles:
-                await self._reheat_handle(handle)
-            return self._descriptors[handle]
-
-        if handle in self._inactive_handles:
-            return await self._activate_handle(handle)
-
-        return None
-
     async def _open_descriptor(self, handle: FileHandle) -> IO:
         await self._ensure_slot()
         try:
-            fd = open(handle._path, handle._mode.mode)
+            fd = handle._open_fd()
             self._descriptors[handle] = fd
             return fd
         except BaseException:
@@ -142,9 +112,13 @@ class FileDescriptorManager:
         if self._closed:
             raise FilePoolNotOpenError()
 
-        fd = await self._restore_descriptor(handle) or await self._open_descriptor(
-            handle
-        )
+        if handle in self._descriptors:
+            if handle in self._cold_handles:
+                await self._reheat_handle(handle)
+            fd = self._descriptors[handle]
+        else:
+            fd = await self._open_descriptor(handle)
+
         try:
             yield fd
         finally:
@@ -175,7 +149,6 @@ class FileDescriptorManager:
                 if close_error is None:
                     close_error = exc
 
-        self._inactive_handles.clear()
         async with self._slots_cond:
             await asyncio.wait_for(
                 self._slots_cond.wait_for(lambda: len(self._descriptors) == 0),

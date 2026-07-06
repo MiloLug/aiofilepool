@@ -24,7 +24,7 @@ from aiofilepool import FilePool
 from aiofilepool._fs import AsyncFileSystem
 from aiofilepool.errors import FilePoolNotOpenError
 
-from .conftest import AsyncGate, FailingIO
+from .conftest import AsyncGate, FailingIO, patch_descriptor_open
 
 
 pytestmark = pytest.mark.asyncio
@@ -227,7 +227,7 @@ async def test_close_surfaces_cold_descriptor_flush_error_after_other_cleanup(
     def fake_open(path, mode):
         return next(opened_ios)
 
-    monkeypatch.setattr("aiofilepool._fd_manager.open", fake_open, raising=False)
+    patch_descriptor_open(monkeypatch, fake_open)
 
     pool = pool_factory(descriptor_pool_size=2, thread_pool_size=0)
     first = await pool.open(path_one, "w+")

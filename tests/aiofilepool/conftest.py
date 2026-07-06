@@ -131,11 +131,7 @@ def async_io_case_factory(request, pool_factory, file_writer, monkeypatch):
             if kind == "handle":
                 path = file_writer(filename, data)
                 if io_obj is not None:
-                    monkeypatch.setattr(
-                        "aiofilepool._fd_manager.open",
-                        lambda path, mode: io_obj,
-                        raising=False,
-                    )
+                    patch_descriptor_open(monkeypatch, lambda path, mode: io_obj)
                 subject = pool.open(path, handle_mode)
                 backing: Path | BinaryIO = path
             else:
@@ -331,6 +327,18 @@ def assemble_intervals(
 
 
 # --- Observability helpers ----------------------------------------------------
+
+
+def patch_descriptor_open(
+    monkeypatch: pytest.MonkeyPatch, opener: Callable[..., Any]
+) -> None:
+    """Intercept the descriptor-opening `open()` inside `FileHandle._open_fd`.
+
+    Descriptors are opened via the module-global `open` in `aiofilepool._handle`;
+    patch that name (never `FileHandle._open_fd` itself) so the mode-selection and
+    `_fd_materialized` logic stays under test.
+    """
+    monkeypatch.setattr("aiofilepool._handle.open", opener, raising=False)
 
 
 def count_fd(pool: FilePool) -> int:
