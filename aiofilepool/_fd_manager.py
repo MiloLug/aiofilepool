@@ -6,16 +6,33 @@ from aiofilepool.errors import FilePoolNotOpenError
 
 
 class FileDescriptorManager:
+    """
+    Manages file descriptors for a FileHandle.
+    It ensures every descriptor is open as long as it's required by the FileHandle.
+    """
+
     def __init__(self, max_descriptors: int):
+        """
+        Args:
+            max_descriptors: The maximum number of descriptors to keep OPEN.
+        """
         if max_descriptors < 1:
             raise ValueError("max_descriptors must be >= 1")
 
         self._max_descriptors = max_descriptors
-        self._descriptors: dict[FileHandle, IO] = {}
-        self._cold_handles: set[FileHandle] = set()
+        self._descriptors: dict[FileHandle, IO] = {}  # Just handle -> fd mapping
+        self._cold_handles: set[FileHandle] = (
+            set()
+        )  # Handles that are not acquired, but are open
         self._slots_cond = asyncio.Condition()
         self._slots = max_descriptors
+
+        # Handles that are not open, but were opened in the past.
+        # This is important, because to re-open them, we need to change the mode
+        # in a specific way, to avoid opening a file AGAIN with "w" flag (for example).
+        # TODO: maybe it's better to just add secondary mode and some flag to the FileHandle, to avoid this altogether?
         self._inactive_handles: set[FileHandle] = set()
+
         self._closed = False
 
     async def _release_slot(self):
@@ -27,6 +44,10 @@ class FileDescriptorManager:
             self._slots_cond.notify()
 
     async def _ensure_slot(self):
+        """
+        Tell "we are about to open a new descriptor".
+        It closes unused descriptors if necessary or waits for a slot to become available.
+        """
         async with self._slots_cond:
             if self._slots < 1:
                 await self._slots_cond.wait_for(lambda: self._closed or self._slots > 0)
@@ -38,7 +59,7 @@ class FileDescriptorManager:
             return
 
         assert len(self._cold_handles) > 0, (
-            "Impossible state: no cold handles but there are slots and max descriptors"
+            "Impossible state: no cold handles but there are slots and maxed out descriptors"
         )
 
         handle = self._cold_handles.pop()
