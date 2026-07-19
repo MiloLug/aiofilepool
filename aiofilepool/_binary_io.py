@@ -68,14 +68,15 @@ class BinaryIOAdapter(AsyncBinaryIO):
             if resolved_size < self._pool._chunking_threshold:
                 data = await self._pool._run_blocking(self._io.read, resolved_size)
             else:
-                data = bytearray()
+                buffer = bytearray()
                 for chunk_size in self._pool._chunker(resolved_size):
-                    data.extend(
+                    buffer.extend(
                         await self._pool._run_blocking(self._io.read, chunk_size)
                     )
+                data = bytes(buffer)
 
             self._position = resolved_offset + resolved_size
-            return bytes(data)
+            return data
 
     async def write(self, data: bytes, offset: int | None = None) -> int:
         if offset is not None and offset < 0:

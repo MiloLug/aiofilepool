@@ -108,7 +108,7 @@ class FileDescriptorManager:
             raise
 
     @asynccontextmanager
-    async def acquire(self, handle: FileHandle) -> AsyncGenerator[IO]:
+    async def acquire(self, handle: FileHandle) -> AsyncGenerator[IO, None]:
         if self._closed:
             raise FilePoolNotOpenError()
 
