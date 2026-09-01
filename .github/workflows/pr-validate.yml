@@ -1,0 +1,29 @@
+name: PR Validate
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: pr-validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    uses: ./.github/workflows/_validation.yml
+    secrets: inherit
+
+  # one gather-job to simplify pr gating
+  validate:
+    needs: [checks]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assert validation passed
+        run: |
+          if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}; then
+            echo "Validation failed or was cancelled."
+            exit 1
+          fi
+          echo "Validation passed."

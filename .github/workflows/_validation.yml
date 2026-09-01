@@ -1,0 +1,67 @@
+name: Validation
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: 
+          python-version-file: .python-version
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: 0.12.7
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Check version is not already released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(uv version --short)
+          echo "Package version: $version"
+
+          if git ls-remote --exit-code origin "refs/tags/$version" > /dev/null; then
+            echo "[ERROR] Tag '$version' already exists"
+            exit 1
+          fi
+
+          releases=$(gh release list --limit 1000 --json tagName --jq '.[].tagName')
+          if echo "$releases" | grep -Fxq "$version"; then
+            echo "[ERROR] Release '$version' already exists"
+            exit 1
+          fi
+
+      - name: Setup the project
+        run: uv sync --locked --group validation --no-group dev
+
+      - name: Run tests and lint
+        run: |
+          fail=0
+
+          echo "=============== CHECK - is buildable?"
+          uv build || fail=1
+
+          echo "=============== CHECK - code style"
+          uv run ruff format --check aiofilepool tests || fail=1
+
+          echo "=============== CHECK - linting"
+          uv run ruff check aiofilepool tests || fail=1
+
+          echo "=============== CHECK - typing"
+          uv run mypy aiofilepool tests || fail=1
+
+          echo "=============== CHECK - tests"
+          uv run pytest -n 2 tests || fail=1
+
+          exit $fail
