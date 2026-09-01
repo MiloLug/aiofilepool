@@ -18,7 +18,7 @@ jobs:
         with: 
           python-version-file: .python-version
 
-      - uses: astral-sh/setup-uv@v9
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: 0.12.7
           enable-cache: true
