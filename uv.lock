@@ -21,6 +21,14 @@ dev = [
     { name = "pytest-xdist" },
     { name = "ruff" },
 ]
+validation = [
+    { name = "hypothesis" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+]
 
 [package.metadata]
 
@@ -28,7 +36,15 @@ dev = [
 dev = [
     { name = "hypothesis", specifier = ">=6.115.0" },
     { name = "mypy", specifier = ">=1.19.1" },
-    { name = "pre-commit", specifier = ">=4.5.1" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "ruff", specifier = ">=0.15.12" },
+]
+validation = [
+    { name = "hypothesis", specifier = ">=6.115.0" },
+    { name = "mypy", specifier = ">=1.19.1" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
